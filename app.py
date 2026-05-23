@@ -879,6 +879,63 @@ with st.sidebar:
     mostrar_fotos = st.checkbox("Mostrar fotos en resultados", value=True)
 
     st.markdown("---")
+    st.markdown("**Estado del sistema**")
+
+    # ── Indicador YOLO ──────────────────────────────────────────────────
+    if YOLO_DISPONIBLE:
+        yolo_test = cargar_yolo()
+        if yolo_test is not None:
+            st.markdown(
+                '<div style="background:#071a0f;border:1px solid #1a5a3a;border-left:3px solid #27c97e;'
+                'border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px;">'
+                '<span style="color:#27c97e">● YOLO ACTIVO</span><br>'
+                '<span style="color:#4a7a5a">best_latas_defectos.pt cargado</span><br>'
+                '<span style="color:#4a7a5a">mAP50: 97.1% · Precisión: 96.6%</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div style="background:#1a1a07;border:1px solid #5a5a1a;border-left:3px solid #f0b429;'
+                'border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px;">'
+                '<span style="color:#f0b429">⚠ YOLO NO ENCONTRADO</span><br>'
+                '<span style="color:#7a7a4a">best_latas_defectos.pt no está en el repo</span><br>'
+                '<span style="color:#7a7a4a">→ Usando Claude Vision como fallback</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.markdown(
+            '<div style="background:#1a0707;border:1px solid #5a1a1a;border-left:3px solid #e55353;'
+            'border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px;">'
+            '<span style="color:#e55353">✗ YOLO NO DISPONIBLE</span><br>'
+            '<span style="color:#7a4a4a">ultralytics/cv2 no instalado</span><br>'
+            '<span style="color:#7a4a4a">→ Usando Claude Vision para cuerpo</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Indicador Claude ─────────────────────────────────────────────────
+    api_check = get_api_key()
+    if api_check:
+        st.markdown(
+            '<div style="background:#071a0f;border:1px solid #1a5a3a;border-left:3px solid #27c97e;'
+            'border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px;margin-top:8px;">'
+            '<span style="color:#27c97e">● CLAUDE ACTIVO</span><br>'
+            '<span style="color:#4a7a5a">API Key detectada</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="background:#1a0707;border:1px solid #5a1a1a;border-left:3px solid #e55353;'
+            'border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px;margin-top:8px;">'
+            '<span style="color:#e55353">✗ CLAUDE SIN API KEY</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
     st.markdown("**Historial de lotes**")
     if st.session_state.historial_lotes:
         for lote in reversed(st.session_state.historial_lotes[-8:]):
