@@ -1,6 +1,6 @@
 """
 Sistema de Inspección de Lotes por Muestreo – Distribuidora ANCO S.A.S.
-ISO 2859-1 · Claude Vision · Gerencia y Control de Calidad
+ISO 2859-1 · YOLOv8n (cuerpo) + Claude Vision (etiqueta) · Gerencia y Control de Calidad
 """
 
 import streamlit as st
@@ -13,9 +13,18 @@ import re
 import time
 import math
 import tempfile
+import numpy as np
+import cv2
 from PIL import Image, ImageEnhance, ImageDraw, ImageFont
 from collections import Counter, defaultdict
 from datetime import datetime
+
+# Ultralytics importado con manejo de error para entornos sin GPU
+try:
+    from ultralytics import YOLO
+    YOLO_DISPONIBLE = True
+except ImportError:
+    YOLO_DISPONIBLE = False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN DE PÁGINA
@@ -319,23 +328,105 @@ def encontrar_riesgos(n, c, nca=0.025, beta_obj=0.10):
 # ══════════════════════════════════════════════════════════════════════════════
 # PROMPTS PARA CLAUDE VISION – alta precisión
 # ══════════════════════════════════════════════════════════════════════════════
-PROMPT_CUERPO = """Eres un inspector de control de calidad de conservas enlatadas con visión industrial.
-Analiza esta imagen del CUERPO / SUPERFICIE de la lata y clasifícala con máxima precisión.
+# ══════════════════════════════════════════════════════════════════════════════
+# YOLO – MODELO DE DEFECTOS FÍSICOS (best_latas_defectos.pt)
+# ══════════════════════════════════════════════════════════════════════════════
 
-Criterios de clasificación:
-- CRITICO: abombamiento, perforación, corrosión profunda (óxido rojo extenso), aplastamiento severo, fuga visible, deformación de cuerpo que compromete la hermeticidad.
-- MAYOR: abolladuras en la zona del doble sello (borde superior/inferior), deformación estructural significativa del cilindro, oxidación extendida (> 20% de superficie), rayones profundos que exponen metal.
-- MENOR: abolladuras superficiales leves en zona central, raspones de pintura sin exposición de metal, suciedad superficial leve, etiqueta despegada parcialmente.
-- CONFORME: lata en buen estado, sin defectos visibles o con imperfecciones cosméticas mínimas que no afectan la integridad.
+# Mapeo de clases del modelo entrenado (según dataset Canned Food Surface Defect)
+YOLO_CLASES = {
+    "Critical Defect": "CRITICO",
+    "Major Defect":    "MAYOR",
+    "Minor Defect":    "MENOR",
+    "No defect":       "CONFORME",
+}
 
-Reglas estrictas:
-1. Si ves cualquier señal de abombamiento en la tapa → CRITICO.
-2. Si el borde (sello) está dañado aunque sea ligeramente → MAYOR.
-3. Ante la duda entre dos categorías, escoge la MÁS GRAVE.
-4. La confianza debe reflejar qué tan claro es el defecto (0.70 mínimo si dudas, 0.95+ si es evidente).
+YOLO_MODEL_PATH = "best_latas_defectos.pt"
+YOLO_CONF_THR   = 0.50   # Recomendado en la ficha técnica del modelo
+YOLO_IMGSZ      = 416    # Input shape del modelo entrenado
 
-Responde SOLO con este JSON, sin texto adicional, sin markdown:
-{"clase":"CRITICO|MAYOR|MENOR|CONFORME","confianza":0.00,"descripcion":"descripcion breve en español del defecto o ausencia de defecto"}"""
+@st.cache_resource
+def cargar_yolo():
+    """Carga el modelo YOLO una sola vez y lo cachea en memoria."""
+    if not YOLO_DISPONIBLE:
+        return None
+    if not os.path.exists(YOLO_MODEL_PATH):
+        return None
+    try:
+        model = YOLO(YOLO_MODEL_PATH)
+        return model
+    except Exception:
+        return None
+
+def analizar_cuerpo_yolo(model, img: Image.Image) -> dict:
+    """
+    Analiza el cuerpo de la lata con YOLOv8n.
+    Retorna la detección de mayor confianza.
+    Si no detecta nada → CONFORME (per ficha técnica: ausencia = sin defecto).
+    conf_thr=0.50 según nota del desarrollador en ficha técnica.
+    """
+    img_np = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    try:
+        results = model(img_np, imgsz=YOLO_IMGSZ, conf=YOLO_CONF_THR, verbose=False)
+    except Exception as e:
+        return {"clase": "ERROR", "confianza": 0.0, "descripcion": f"Error YOLO: {e}", "boxes": []}
+
+    detecciones = []
+    for r in results:
+        for box in r.boxes:
+            class_id   = int(box.cls[0])
+            class_name = model.names[class_id]
+            conf       = float(box.conf[0])
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            clase_norm = YOLO_CLASES.get(class_name, "CONFORME")
+            detecciones.append({
+                "clase_raw": class_name,
+                "clase": clase_norm,
+                "confianza": round(conf, 3),
+                "box": (x1, y1, x2, y2),
+            })
+
+    if not detecciones:
+        # Sin detecciones = conforme (per ficha técnica)
+        return {
+            "clase": "CONFORME",
+            "confianza": 0.92,
+            "descripcion": "Sin defectos detectados por YOLO",
+            "boxes": [],
+            "fuente": "YOLO",
+        }
+
+    # Tomar la detección de mayor confianza que no sea CONFORME
+    # Si todas son CONFORME, queda CONFORME
+    priority = {"CRITICO": 4, "MAYOR": 3, "MENOR": 2, "CONFORME": 1, "ERROR": 0}
+    detecciones.sort(key=lambda d: (priority.get(d["clase"], 0), d["confianza"]), reverse=True)
+    mejor = detecciones[0]
+
+    # Descripción automática
+    desc_map = {
+        "CRITICO": f"Defecto crítico detectado ({mejor['clase_raw']}) con {mejor['confianza']:.0%} de confianza",
+        "MAYOR":   f"Defecto mayor detectado ({mejor['clase_raw']}) con {mejor['confianza']:.0%} de confianza",
+        "MENOR":   f"Defecto menor detectado ({mejor['clase_raw']}) con {mejor['confianza']:.0%} de confianza",
+        "CONFORME": f"Lata conforme según YOLO con {mejor['confianza']:.0%} de confianza",
+    }
+
+    return {
+        "clase": mejor["clase"],
+        "confianza": mejor["confianza"],
+        "descripcion": desc_map.get(mejor["clase"], ""),
+        "boxes": [(d["box"], d["clase"], d["confianza"]) for d in detecciones],
+        "fuente": "YOLO",
+    }
+
+def dibujar_boxes(img: Image.Image, boxes: list) -> Image.Image:
+    """Dibuja bounding boxes del YOLO sobre la imagen para visualización."""
+    img_out = img.copy().convert("RGB")
+    draw = ImageDraw.Draw(img_out)
+    colores = {"CRITICO": "#e55353", "MAYOR": "#f0b429", "MENOR": "#3a7bd5", "CONFORME": "#27c97e"}
+    for (x1, y1, x2, y2), clase, conf in boxes:
+        color = colores.get(clase, "#ffffff")
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+        draw.text((x1 + 4, y1 + 4), f"{clase} {conf:.0%}", fill=color)
+    return img_out
 
 PROMPT_ETIQUETA = """Eres un inspector de control de calidad especializado en etiquetas y fechas de vencimiento de conservas enlatadas.
 Analiza esta imagen de la ETIQUETA y determina el estado de la fecha de vencimiento.
@@ -358,6 +449,15 @@ La confianza debe ser ≥ 0.85 si la fecha es claramente visible, < 0.70 si hay 
 
 Responde SOLO con este JSON, sin texto adicional, sin markdown:
 {"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"DD/MM/AAAA o texto encontrado o null","confianza":0.00,"descripcion":"descripcion breve en español"}"""
+
+PROMPT_CLAUDE_CUERPO_FALLBACK = """Eres un inspector de control de calidad de conservas enlatadas.
+Analiza esta imagen del CUERPO de la lata. Solo si YOLO no está disponible.
+- CRITICO: abombamiento, perforación, corrosión profunda, fuga visible.
+- MAYOR: abolladuras en sello, deformación estructural, oxidación extendida.
+- MENOR: abolladuras leves en zona central, raspones superficiales.
+- CONFORME: sin defectos visibles.
+Responde SOLO con este JSON sin texto adicional:
+{"clase":"CRITICO|MAYOR|MENOR|CONFORME","confianza":0.00,"descripcion":"breve descripcion en español"}"""
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FUNCIONES DE VISIÓN
@@ -797,7 +897,7 @@ with st.sidebar:
 st.markdown(
     '<div class="hero">'
     '<div class="hero-title">🥫 SISTEMA DE INSPECCIÓN DE LOTES – ANCO S.A.S.</div>'
-    '<p class="hero-sub">ISO 2859-1 · NCA 2.5% · Inspección normal Nivel II · Claude Vision (sin YOLO) · Gerencia y Control de Calidad</p>'
+    '<p class="hero-sub">ISO 2859-1 · NCA 2.5% · YOLOv8n (cuerpo) + Claude Vision (etiqueta) · Gerencia y Control de Calidad</p>'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -829,7 +929,7 @@ with tab_plan:
     with col1:
         N_input = st.number_input(
             "Tamaño del lote N (unidades)",
-            min_value=2, max_value=500000, value=900, step=1,
+            min_value=2, max_value=500000, value=60, step=1,
         )
 
     letra, n_auto, c_auto = iso_plan(N_input)
@@ -871,7 +971,7 @@ with tab_plan:
     st.markdown("#### Reglas de clasificación por lata")
     col_r1, col_r2 = st.columns(2)
     with col_r1:
-        st.markdown("**Defectos de cuerpo (YOLO)**")
+        st.markdown("**Defectos de cuerpo (YOLOv8n)**")
         st.markdown(
             "| Clase | Cuenta como NC |\n"
             "|---|---|\n"
@@ -902,7 +1002,7 @@ with tab_insp:
     st.markdown("#### Configuración del lote a inspeccionar")
     c1, c2, c3 = st.columns(3)
     with c1:
-        N_lote = st.number_input("N – Tamaño del lote", min_value=2, max_value=500000, value=900, step=1, key="N_insp")
+        N_lote = st.number_input("N – Tamaño del lote", min_value=2, max_value=500000, value=60, step=1, key="N_insp")
     with c2:
         _, n_lote, c_lote = iso_plan(N_lote)
         st.metric("n – Latas a inspeccionar", n_lote)
@@ -973,12 +1073,20 @@ with tab_insp:
             img_cuerpo = Image.open(fotos_cuerpo_s[i]).convert("RGB")
             img_etiqueta = Image.open(fotos_etiqueta_s[i]).convert("RGB")
 
-            # Análisis con consenso por votación
-            status_text.markdown(f"`[{lata_id}]` Analizando cuerpo...")
-            res_cuerpo = analizar_con_consenso(client, img_cuerpo, PROMPT_CUERPO, modelo_sel, intentos)
+            # ── CUERPO: YOLO si está disponible, Claude Vision como fallback ──
+            status_text.markdown(f"`[{lata_id}]` Analizando cuerpo con YOLO...")
+            yolo_model = cargar_yolo()
+            if yolo_model is not None:
+                res_cuerpo = analizar_cuerpo_yolo(yolo_model, img_cuerpo)
+            else:
+                # Fallback a Claude Vision si YOLO no está disponible
+                status_text.markdown(f"`[{lata_id}]` YOLO no disponible → usando Claude Vision para cuerpo...")
+                res_cuerpo = analizar_con_consenso(client, img_cuerpo, PROMPT_CLAUDE_CUERPO_FALLBACK, modelo_sel, intentos)
 
-            status_text.markdown(f"`[{lata_id}]` Analizando etiqueta...")
-            res_etiqueta = analizar_con_consenso(client, img_etiqueta, PROMPT_ETIQUETA, modelo_sel, intentos)
+            # ── ETIQUETA: siempre Claude Vision (1 sola llamada, sin triple votación si YOLO activo) ──
+            status_text.markdown(f"`[{lata_id}]` Analizando etiqueta con Claude Vision...")
+            votos_etiqueta = 1 if yolo_model is not None else intentos
+            res_etiqueta = analizar_con_consenso(client, img_etiqueta, PROMPT_ETIQUETA, modelo_sel, votos_etiqueta)
 
             nc, motivo = es_no_conforme(res_cuerpo, res_etiqueta)
             if nc:
@@ -1059,9 +1167,10 @@ with tab_insp:
             else:
                 badge = f'<span class="badge badge-ok">CONFORME</span>'
 
+            fuente_cuerpo = lata['cuerpo'].get('fuente', 'Claude')
             detalle = (
-                f"Cuerpo: <b>{clase}</b> ({conf_c:.0%}) – {lata['cuerpo'].get('descripcion','')[:70]} | "
-                f"Etiqueta: <b>{estado}</b> ({conf_e:.0%})"
+                f"[{fuente_cuerpo}] Cuerpo: <b>{clase}</b> ({conf_c:.0%}) – {lata['cuerpo'].get('descripcion','')[:60]} | "
+                f"[Claude] Etiqueta: <b>{estado}</b> ({conf_e:.0%})"
                 + (f" · {lata['etiqueta'].get('fecha_leida','')}" if lata["etiqueta"].get("fecha_leida") else "")
             )
 
@@ -1077,9 +1186,14 @@ with tab_insp:
             if mostrar_fotos and nc:
                 c_img1, c_img2 = st.columns(2)
                 with c_img1:
-                    st.image(lata["img_cuerpo"], caption=f"Cuerpo {lata['id']}", width=220)
+                    boxes = lata['cuerpo'].get('boxes', [])
+                    if boxes:
+                        img_ann = dibujar_boxes(lata["img_cuerpo"], boxes)
+                        st.image(img_ann, caption=f"Cuerpo {lata['id']} (YOLO)", width=220)
+                    else:
+                        st.image(lata["img_cuerpo"], caption=f"Cuerpo {lata['id']}", width=220)
                 with c_img2:
-                    st.image(lata["img_etiqueta"], caption=f"Etiqueta {lata['id']}", width=220)
+                    st.image(lata["img_etiqueta"], caption=f"Etiqueta {lata['id']} (Claude)", width=220)
 
         # ── Reporte PDF ──
         st.markdown("---")
@@ -1208,6 +1322,6 @@ with tab_hist:
 # FOOTER
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown(
-    '<div class="footer">ANCO S.A.S. · ISO 2859-1 · NCA 2.5% · Claude Vision · Gerencia y Control de Calidad · UNICAUCA 2026</div>',
+    '<div class="footer">ANCO S.A.S. · ISO 2859-1 · NCA 2.5% · YOLOv8n + Claude Vision · Gerencia y Control de Calidad · UNICAUCA 2026</div>',
     unsafe_allow_html=True,
 )
