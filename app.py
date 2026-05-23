@@ -13,18 +13,22 @@ import re
 import time
 import math
 import tempfile
-import numpy as np
-import cv2
+# cv2 y numpy se importan dentro de las funciones YOLO para evitar errores en entornos headless
 from PIL import Image, ImageEnhance, ImageDraw, ImageFont
 from collections import Counter, defaultdict
 from datetime import datetime
 
-# Ultralytics importado con manejo de error para entornos sin GPU
+# Ultralytics y cv2 importados con manejo de error para entornos headless/sin GPU
 try:
+    import numpy as np
+    import cv2
     from ultralytics import YOLO
     YOLO_DISPONIBLE = True
-except ImportError:
+except Exception:
     YOLO_DISPONIBLE = False
+    np = None
+    cv2 = None
+    YOLO = None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN DE PÁGINA
@@ -347,7 +351,7 @@ YOLO_IMGSZ      = 416    # Input shape del modelo entrenado
 @st.cache_resource
 def cargar_yolo():
     """Carga el modelo YOLO una sola vez y lo cachea en memoria."""
-    if not YOLO_DISPONIBLE:
+    if not YOLO_DISPONIBLE or YOLO is None:
         return None
     if not os.path.exists(YOLO_MODEL_PATH):
         return None
@@ -364,6 +368,8 @@ def analizar_cuerpo_yolo(model, img: Image.Image) -> dict:
     Si no detecta nada → CONFORME (per ficha técnica: ausencia = sin defecto).
     conf_thr=0.50 según nota del desarrollador en ficha técnica.
     """
+    if not YOLO_DISPONIBLE or cv2 is None or np is None:
+        return {"clase": "ERROR", "confianza": 0.0, "descripcion": "YOLO/cv2 no disponible en este entorno", "boxes": []}
     img_np = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
     try:
         results = model(img_np, imgsz=YOLO_IMGSZ, conf=YOLO_CONF_THR, verbose=False)
