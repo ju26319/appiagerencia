@@ -297,67 +297,45 @@ def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
     anio_hoy = datetime.now().year
 
     if fecha_minima_str:
-        # Con fecha mínima: SOLO comparar contra la fecha mínima, NO contra hoy
-        # Esto permite aceptar fechas ya vencidas pero dentro del rango del dataset
-        regla_vigente = (
-            f"VIGENTE: fecha encontrada y es IGUAL O POSTERIOR a {fecha_minima_str}. "
-            f"No importa si la fecha ya paso hoy ({hoy}) — solo importa si es posterior a {fecha_minima_str}."
-        )
-        regla_vencida = (
-            f"VENCIDA: fecha encontrada y es ESTRICTAMENTE ANTERIOR a {fecha_minima_str}. "
-            f"Por ejemplo: si la fecha minima es 01/01/2024, entonces una fecha de DIC2023 es VENCIDA "
-            f"pero FEB2025 es VIGENTE aunque ya haya pasado hoy."
-        )
-        regla_ilegible = (
-            "ILEGIBLE: texto presente pero imposible leer ningun digito ni letra tras rotar mentalmente. "
-            "ULTIMO RECURSO — si puedes leer el anio, clasifica segun la regla anterior."
-        )
-        ejemplo = (
-            f"EJEMPLO con fecha minima {fecha_minima_str}: "
-            f"18FEB2025 → VIGENTE (posterior a {fecha_minima_str}). "
-            f"31OCT2025 → VIGENTE. 11FEB2025 → VIGENTE. "
-            f"Solo seria VENCIDA si la fecha fuera anterior a {fecha_minima_str}."
+        regla_decision = (
+            f"DECISION: Si encuentras CUALQUIER texto que parezca fecha (numeros con letras de mes):\n"
+            f"  - Si esa fecha es posterior o igual a {fecha_minima_str} → responde VIGENTE\n"
+            f"  - Si esa fecha es anterior a {fecha_minima_str} → responde VENCIDA\n"
+            f"  - Si no puedes leer absolutamente ningun digito → responde ILEGIBLE\n"
+            f"  - Si no hay ningun texto en la imagen → responde SIN_FECHA\n"
+            f"EJEMPLOS con fecha minima {fecha_minima_str}:\n"
+            f"  18FEB2025 → VIGENTE | 31OCT2025 → VIGENTE | 11FEB2025 → VIGENTE\n"
+            f"  DEC2023 → VENCIDA | NOV2019 → VENCIDA\n"
+            f"  Texto ilegible parcial → intenta rotar 180 grados y vuelve a leer antes de decir ILEGIBLE"
         )
     else:
-        # Sin fecha mínima: comparar contra hoy normalmente
-        regla_vigente = f"VIGENTE: fecha encontrada y posterior a hoy ({hoy})."
-        regla_vencida = f"VENCIDA: fecha encontrada y anterior o igual a hoy ({hoy})."
-        regla_ilegible = (
-            "ILEGIBLE: texto presente pero imposible leer ningun digito ni letra. "
-            f"ULTIMO RECURSO — si puedes leer el anio, compara con {anio_hoy}."
+        regla_decision = (
+            f"DECISION: Si encuentras CUALQUIER texto que parezca fecha (numeros con letras de mes):\n"
+            f"  - Si esa fecha es posterior a hoy ({hoy}) → responde VIGENTE\n"
+            f"  - Si esa fecha es anterior o igual a hoy → responde VENCIDA\n"
+            f"  - Si no puedes leer absolutamente ningun digito → responde ILEGIBLE\n"
+            f"  - Si no hay ningun texto en la imagen → responde SIN_FECHA"
         )
-        ejemplo = ""
 
     return (
-        "Eres un sistema OCR experto en leer texto grabado/estampado en metal de latas de conserva.\n\n"
+        "Eres un lector OCR de fechas de vencimiento en fondos de latas metalicas.\n\n"
 
-        "CONTEXTO: Las fechas en estas latas estan grabadas en relieve sobre metal plateado. "
-        "Suelen ser pequenas, pueden estar al reves, rotadas 90/180 grados, o en angulo. "
-        "El formato mas comun es DDMMMYYYY por ejemplo 18FEB2025 o 31OCT2025. "
-        "Tambien aparecen como MMDDYY, MM/YYYY, o YYYY-MM-DD.\n\n"
+        "TAREA UNICA: Encontrar y leer la fecha de vencimiento grabada en el metal.\n\n"
 
-        "PASO 1 — LOCALIZAR: Busca en TODA la imagen cualquier texto que incluya:\n"
-        "  Indicadores: EXP, EXPIRY, EXPR, EXP DATE, EXP., BB, BEST BEFORE, VENCE, VENC, CAD, CONSUME ANTES\n"
-        "  Si no encuentras indicador, busca secuencias de numeros+letras que parezcan fecha (ejemplo: 18FEB2025).\n"
-        "  IGNORAR: nombres de marca, pais de origen, logos, textos decorativos como CERTIFIED QUALITY, ARGENTINA, PRODUCT OF, etc.\n\n"
+        "COMO LEER EL TEXTO EN METAL:\n"
+        "1. El texto esta grabado en relieve — puede ser muy tenue. Busca en toda la imagen.\n"
+        "2. Formato tipico: DDMMMYYYY ejemplo 18FEB2025, 31OCT2025, 11FEB2025\n"
+        "3. Indicadores: EXP, EXPIRY, EXPR, EXP DATE, BB, BEST BEFORE, VENCE, CAD\n"
+        "4. Si el texto esta al reves, rota mentalmente la imagen 180 grados y lee de nuevo.\n"
+        "5. IGNORA: nombres de marca, pais, textos decorativos (CERTIFIED, QUALITY, ARGENTINA, PRODUCT OF, YOUNGS TOWN)\n\n"
 
-        "PASO 2 — LEER: Rota mentalmente la imagen hasta que el texto tenga sentido. "
-        "Descifra letra por letra. Meses en ingles: JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC. "
-        "En espanol: ENE FEB MAR ABR MAY JUN JUL AGO SEP OCT NOV DIC.\n\n"
+        + regla_decision + "\n\n"
 
-        "PASO 3 — CLASIFICAR con estas reglas:\n"
-        f"  {regla_vigente}\n"
-        f"  {regla_vencida}\n"
-        f"  {regla_ilegible}\n"
-        "  SIN_FECHA: la imagen no tiene absolutamente ningun texto visible.\n\n"
+        "IMPORTANTE: Sigue estas reglas de forma DETERMINISTICA — para la misma imagen "
+        "siempre debes dar la misma respuesta. No uses criterios subjetivos.\n\n"
 
-        + (f"{ejemplo}\n\n" if ejemplo else "")
-
-        + "REGLA DE ORO: Es mejor dar VIGENTE o VENCIDA con confianza baja (0.50) "
-        "que dar ILEGIBLE. Solo usa ILEGIBLE si es COMPLETAMENTE imposible leer algo.\n\n"
-
-        "Responde SOLO con este JSON, sin texto adicional, sin markdown:\n"
-        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto leido o null","confianza":0.00,"descripcion":"que texto viste y donde"}'
+        "Responde SOLO con este JSON sin texto adicional:\n"
+        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto o null","confianza":0.00,"descripcion":"texto que viste"}'
     )
 
 PROMPT_ETIQUETA = construir_prompt_etiqueta()  # default sin fecha minima
@@ -397,9 +375,13 @@ def parse_json(txt):
     return None
 
 def llamar_claude(client,b64,prompt,modelo):
-    r=client.messages.create(model=modelo,max_tokens=250,messages=[{"role":"user","content":[
-        {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":b64}},
-        {"type":"text","text":prompt}]}])
+    r=client.messages.create(
+        model=modelo,
+        max_tokens=250,
+        temperature=0,  # Determinismo maximo: misma imagen = mismo resultado
+        messages=[{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":b64}},
+            {"type":"text","text":prompt}]}])
     return parse_json(r.content[0].text)
 
 def consenso_claude(client,img,prompt,modelo,intentos=1,es_etiqueta=False):
