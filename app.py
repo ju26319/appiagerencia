@@ -338,7 +338,8 @@ def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
 
         "PASO 1 — LOCALIZAR: Busca en TODA la imagen cualquier texto que incluya:\n"
         "  Indicadores: EXP, EXPIRY, EXPR, EXP DATE, EXP., BB, BEST BEFORE, VENCE, VENC, CAD, CONSUME ANTES\n"
-        "  Si no encuentras indicador, busca cualquier secuencia de letras+numeros que parezca fecha.\n\n"
+        "  Si no encuentras indicador, busca secuencias de numeros+letras que parezcan fecha (ejemplo: 18FEB2025).\n"
+        "  IGNORAR: nombres de marca, pais de origen, logos, textos decorativos como CERTIFIED QUALITY, ARGENTINA, PRODUCT OF, etc.\n\n"
 
         "PASO 2 — LEER: Rota mentalmente la imagen hasta que el texto tenga sentido. "
         "Descifra letra por letra. Meses en ingles: JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC. "
@@ -752,7 +753,7 @@ with st.sidebar:
         with col_fm1:
             mes_min = st.number_input("Mes", min_value=1, max_value=12, value=1, step=1, key="mes_min")
         with col_fm2:
-            anio_min = st.number_input("Año", min_value=2000, max_value=2099, value=datetime.now().year, step=1, key="anio_min")
+            anio_min = st.number_input("Año", min_value=2000, max_value=2099, value=2020, step=1, key="anio_min")
         try:
             fecha_minima = datetime(int(anio_min), int(mes_min), 1)
             fecha_minima_str = fecha_minima.strftime("%d/%m/%Y")
