@@ -140,9 +140,25 @@ def riesgos(n,c,nca=0.025,bo=0.10):
 # ══════════════════════════════════════════════════════════════════════════════
 # YOLO
 # ══════════════════════════════════════════════════════════════════════════════
-# Busca ONNX primero (liviano), luego .pt como fallback
-import os as _os2
-YOLO_PATH = "best_latas_defectos.onnx" if _os2.path.exists("best_latas_defectos.onnx") else "best_latas_defectos.pt"
+# Busca el modelo en múltiples ubicaciones posibles
+import os as _os2, sys as _sys
+
+def _encontrar_modelo(nombre):
+    # Buscar en directorio actual, directorio del script, y rutas de Streamlit Cloud
+    candidatos = [
+        nombre,
+        _os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)), nombre),
+        _os2.path.join("/mount/src/appiagerencia", nombre),
+        _os2.path.join(_os2.getcwd(), nombre),
+    ]
+    for c in candidatos:
+        if _os2.path.exists(c):
+            return c
+    return None
+
+_onnx = _encontrar_modelo("best_latas_defectos.onnx")
+_pt   = _encontrar_modelo("best_latas_defectos.pt")
+YOLO_PATH    = _onnx if _onnx else (_pt if _pt else "best_latas_defectos.onnx")
 YOLO_ES_ONNX = YOLO_PATH.endswith(".onnx")
 YOLO_CONF_THR = 0.50
 YOLO_IMGSZ    = 416
@@ -152,7 +168,7 @@ YOLO_NOMBRES  = {0:"Critical Defect", 1:"Major Defect", 2:"Minor Defect", 3:"No 
 @st.cache_resource
 def cargar_yolo():
     if not YOLO_DISPONIBLE: return None
-    if not os.path.exists(YOLO_PATH): return None
+    if not os.path.exists(YOLO_PATH) and not os.path.isfile(YOLO_PATH): return None
     if YOLO_ES_ONNX:
         if ort is None: return None
         try:
