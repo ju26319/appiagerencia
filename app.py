@@ -911,7 +911,7 @@ with tab_insp:
 
     if st.button("🔬 INICIAR INSPECCIÓN",disabled=not puede,type="primary"):
         fc_s=sorted(fotos_c,key=lambda f:f.name); fe_s=sorted(fotos_e,key=lambda f:f.name)
-        total=min(len(fc_s),len(fe_s)); resultados=[]; X=0; obs=0; correcciones=0
+        total=min(len(fc_s),len(fe_s)); resultados=[]; X=0; obs=0; correcciones=0; dudosas_count=0
 
         yolo_model=cargar_yolo()
         yolo_ok=yolo_model is not None and YOLO_DISPONIBLE
