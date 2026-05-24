@@ -579,30 +579,22 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**📅 Vigencia mínima de etiqueta**")
     usar_fecha_min = st.checkbox("Activar fecha mínima de aceptación", value=False,
-        help="Si está activo, solo se aceptan latas cuya fecha de vencimiento sea posterior a la fecha configurada.")
+        help="Solo se aceptan latas cuya fecha de vencimiento sea posterior a la fecha configurada.")
     if usar_fecha_min:
-        col_fm1, col_fm2, col_fm3 = st.columns(3)
+        col_fm1, col_fm2 = st.columns(2)
         with col_fm1:
-            dia_min = st.number_input("Día", min_value=1, max_value=31, value=datetime.now().day, step=1, key="dia_min")
+            mes_min = st.number_input("Mes", min_value=1, max_value=12, value=1, step=1, key="mes_min")
         with col_fm2:
-            mes_min = st.number_input("Mes", min_value=1, max_value=12, value=datetime.now().month, step=1, key="mes_min")
-        with col_fm3:
-            anio_min = st.number_input("Año", min_value=2024, max_value=2040, value=datetime.now().year + 1, step=1, key="anio_min")
+            anio_min = st.number_input("Año", min_value=2000, max_value=2099, value=datetime.now().year, step=1, key="anio_min")
         try:
-            fecha_minima = datetime(int(anio_min), int(mes_min), int(dia_min))
+            fecha_minima = datetime(int(anio_min), int(mes_min), 1)
             fecha_minima_str = fecha_minima.strftime("%d/%m/%Y")
-            dias_desde_hoy = (fecha_minima - datetime.now()).days
-            if dias_desde_hoy > 0:
-                st.markdown(
-                    f'<div style="background:#0d0a1a;border:1px solid #3a2a5a;border-left:3px solid #a78bfa;'
-                    f'border-radius:4px;padding:8px 10px;font-size:11px;font-family:monospace;color:#a78bfa;margin-top:6px">'
-                    f'Aceptar solo si vence después del<br>'
-                    f'<b style="color:#f0b429;font-size:13px">{fecha_minima_str}</b><br>'
-                    f'<span style="color:#6a5a8a">({dias_desde_hoy} días desde hoy)</span>'
-                    f'</div>', unsafe_allow_html=True)
-            else:
-                st.warning("La fecha mínima debe ser posterior a hoy.", icon="⚠️")
-                fecha_minima_str = None
+            st.markdown(
+                f'<div style="background:#0d0a1a;border:1px solid #3a2a5a;border-left:3px solid #a78bfa;'
+                f'border-radius:4px;padding:8px 10px;font-size:11px;font-family:monospace;margin-top:6px">'
+                f'<span style="color:#a78bfa">Aceptar solo si vence después de</span><br>'
+                f'<b style="color:#f0b429;font-size:14px">{mes_min:02d}/{int(anio_min)}</b>'
+                f'</div>', unsafe_allow_html=True)
         except ValueError:
             st.error("Fecha inválida.", icon="❌")
             fecha_minima_str = None
