@@ -593,8 +593,9 @@ def reporte_pdf(resultados,N,n,c,decision,X,sid,correcciones_count):
         foto_h = IMG_H
         y_foto = y - BLOQUE_H + 0.2*cm
 
-        for foto_idx, (img_key, label) in enumerate([("img_cuerpo","C"), ("img_etiqueta","E")]):
-            img_pil = lata.get(img_key)
+        for foto_idx, (img_key, label) in enumerate([("img_cuerpo_bytes","C"), ("img_etiqueta_bytes","E")]):
+            _raw = lata.get(img_key)
+            img_pil = Image.open(io.BytesIO(_raw)).convert("RGB") if _raw else None
             x_foto = x_bloque + 0.1*cm + foto_idx * (foto_w + 0.2*cm)
             if img_pil:
                 try:
@@ -852,6 +853,15 @@ with tab_insp:
             prog.progress(i/total,f"Lata {lid} de {total}...")
             img_c=Image.open(fc_s[i]).convert("RGB")
             img_e=Image.open(fe_s[i]).convert("RGB")
+            # Comprimir fotos inmediatamente para liberar memoria RAM
+            def _compress(img, max_px=640):
+                img.thumbnail((max_px, max_px), Image.LANCZOS)
+                buf_=io.BytesIO()
+                img.save(buf_, format="JPEG", quality=75)
+                buf_.seek(0)
+                return buf_.getvalue()
+            bytes_c = _compress(img_c)
+            bytes_e = _compress(img_e)
 
             corregido=False; yolo_orig=None
 
@@ -863,7 +873,9 @@ with tab_insp:
                 if retro_activo:
                     # ── Claude revisa a YOLO ─────────────────────────────
                     status.markdown(f"`[{lid}]` 👁 Claude revisando decisión de YOLO...")
-                    retro=retroalimentar_claude(client,img_c,res_c,modelo_sel)
+                    _img_c_retro=Image.open(io.BytesIO(bytes_c)).convert("RGB")
+                    retro=retroalimentar_claude(client,_img_c_retro,res_c,modelo_sel)
+                    del _img_c_retro
                     if retro:
                         yolo_orig=res_c.copy()
                         corrige=retro.get("corrige_yolo",False) or retro.get("clase")!=res_c["clase"]
@@ -886,15 +898,20 @@ with tab_insp:
             elif res_c.get("clase")=="MENOR": obs+=1
 
             resultados.append({"id":lid,"cuerpo":res_c,"etiqueta":res_e,"no_conforme":nc,"motivo":motivo,
-                "img_cuerpo":img_c,"img_etiqueta":img_e,"corregido":corregido,"yolo_original":yolo_orig})
+                "img_cuerpo_bytes":bytes_c,"img_etiqueta_bytes":bytes_e,"corregido":corregido,"yolo_original":yolo_orig})
+            # Liberar objetos PIL inmediatamente
+            del img_c, img_e, bytes_c, bytes_e
 
         prog.progress(1.0,"✅ Inspección completada."); status.empty()
         decision="ACEPTADO" if X<=c_lote else "RECHAZADO"
         pp=X/total if total>0 else 0
 
-        st.session_state.resultados_actuales=resultados
+        # No guardamos resultados en session_state para ahorrar RAM
         st.session_state.historial_lotes.append({"id":datetime.now().strftime("%H%M%S"),
             "N":N_lote,"n":total,"c":c_lote,"X":X,"decision":decision})
+        # Limitar historial a últimos 10 lotes para no crecer indefinidamente
+        if len(st.session_state.historial_lotes) > 10:
+            st.session_state.historial_lotes = st.session_state.historial_lotes[-10:]
 
         # ── Decisión ────────────────────────────────────────────────────
         cls_d="decision-acepta" if decision=="ACEPTADO" else "decision-rechaza"
@@ -932,13 +949,17 @@ with tab_insp:
             if mostrar_fotos and nc:
                 ci1,ci2=st.columns(2)
                 with ci1:
+                    _img_c=Image.open(io.BytesIO(lata["img_cuerpo_bytes"])).convert("RGB")
                     boxes=lata["cuerpo"].get("boxes",[])
-                    img_ann=dibujar_boxes(lata["img_cuerpo"],boxes) if boxes else lata["img_cuerpo"]
+                    img_ann=dibujar_boxes(_img_c,boxes) if boxes else _img_c
                     lbl=f"Cuerpo {lata['id']} ({fuente})"
-                    if corr: lbl+=" ← corregido"
+                    if corr: lbl+=" corregido"
                     st.image(img_ann,caption=lbl,width=220)
+                    del _img_c, img_ann
                 with ci2:
-                    st.image(lata["img_etiqueta"],caption=f"Etiqueta {lata['id']} (Claude)",width=220)
+                    _img_e=Image.open(io.BytesIO(lata["img_etiqueta_bytes"])).convert("RGB")
+                    st.image(_img_e,caption=f"Etiqueta {lata['id']} (Claude)",width=220)
+                    del _img_e
 
         # ── PDF ────────────────────────────────────────────────────────
         st.markdown("---")
