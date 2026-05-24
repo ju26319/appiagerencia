@@ -347,6 +347,27 @@ def preproc(img,mn=640):
     img=ImageEnhance.Contrast(img).enhance(1.4)
     return ImageEnhance.Sharpness(img).enhance(1.8)
 
+def preproc_etiqueta(img, mn=800):
+    """
+    Preprocesa específicamente imágenes de etiqueta:
+    - Mayor resolución (800px)
+    - Mayor contraste y nitidez para texto grabado en metal
+    - Recorta la zona central donde suele estar la fecha
+    """
+    w,h=img.size
+    # Escalar a resolución mayor
+    if min(w,h)<mn:
+        f=mn/min(w,h); img=img.resize((int(w*f),int(h*f)),Image.LANCZOS)
+    # Recortar zona central (la fecha suele estar en el centro del fondo)
+    w2,h2=img.size
+    margen_w=int(w2*0.1); margen_h=int(h2*0.1)
+    img=img.crop((margen_w, margen_h, w2-margen_w, h2-margen_h))
+    # Aumentar contraste y nitidez más agresivamente para texto en metal
+    img=ImageEnhance.Contrast(img).enhance(2.0)
+    img=ImageEnhance.Sharpness(img).enhance(3.0)
+    img=ImageEnhance.Brightness(img).enhance(1.1)
+    return img
+
 def parse_json(txt):
     txt=re.sub(r"```[a-z]*","",txt).strip().strip("`").strip()
     try: return json.loads(txt)
@@ -363,13 +384,36 @@ def llamar_claude(client,b64,prompt,modelo):
         {"type":"text","text":prompt}]}])
     return parse_json(r.content[0].text)
 
-def consenso_claude(client,img,prompt,modelo,intentos=1):
-    img=preproc(img); b64=pil_b64(img); res=[]
+def consenso_claude(client,img,prompt,modelo,intentos=1,es_etiqueta=False):
+    """
+    Para etiquetas: usa preprocesamiento específico y envía múltiples rotaciones
+    si la primera respuesta es ILEGIBLE.
+    """
+    if es_etiqueta:
+        img_proc = preproc_etiqueta(img)
+    else:
+        img_proc = preproc(img)
+
+    b64=pil_b64(img_proc); res=[]
     for _ in range(intentos):
         try:
             r=llamar_claude(client,b64,prompt,modelo)
             if r: res.append(r)
         except: pass
+
+    # Si es etiqueta y todos los resultados son ILEGIBLE, probar con rotaciones
+    if es_etiqueta and all(r.get("estado","") == "ILEGIBLE" for r in res):
+        from PIL import Image as _PImage
+        for angulo in [90, 180, 270]:
+            img_rot = img_proc.rotate(angulo, expand=True)
+            b64_rot = pil_b64(img_rot)
+            try:
+                r = llamar_claude(client, b64_rot, prompt, modelo)
+                if r and r.get("estado","") != "ILEGIBLE":
+                    res.append(r)
+                    break  # Con una buena lectura es suficiente
+            except: pass
+
     if not res: return {"clase":"ERROR","estado":"ERROR","confianza":0.0,"descripcion":"Sin respuesta","fuente":"Claude"}
     campo="clase" if "clase" in res[0] else "estado"
     ganador=Counter(r.get(campo,"ERROR") for r in res).most_common(1)[0][0]
@@ -865,7 +909,9 @@ with tab_insp:
                 buf_.seek(0)
                 return buf_.getvalue()
             bytes_c = _compress(img_c)
-            bytes_e = _compress(img_e)
+            # Etiqueta: mayor calidad (85%) para preservar texto grabado
+            buf_e_=io.BytesIO(); img_e.save(buf_e_,format="JPEG",quality=85); buf_e_.seek(0)
+            bytes_e = buf_e_.getvalue()
 
             corregido=False; yolo_orig=None
 
@@ -895,7 +941,7 @@ with tab_insp:
             status.markdown(f"`[{lid}]` 🏷️ Claude analizando etiqueta...")
             _fm = st.session_state.get("fecha_minima_str")
             _prompt_e = construir_prompt_etiqueta(_fm) if _fm else PROMPT_ETIQUETA
-            res_e=consenso_claude(client,img_e,_prompt_e,modelo_sel,votos_e)
+            res_e=consenso_claude(client,img_e,_prompt_e,modelo_sel,votos_e,es_etiqueta=True)
 
             nc,motivo=es_nc(res_c,res_e)
             if nc: X+=1
