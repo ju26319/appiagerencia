@@ -320,7 +320,7 @@ INSTRUCCIONES DE LECTURA:
 
 REGLAS DE CLASIFICACIÓN:
 {regla_vigente}
-- VENCIDA: fecha leída con certeza y es anterior a hoy{f", O estrictamente anterior a {fecha_minima_str} (sin incluirla)" if fecha_minima_str else ""}.
+- VENCIDA: fecha leida con certeza y es anterior a hoy. Si hay fecha minima configurada, tambien es VENCIDA si es anterior a dicha fecha.
 - ILEGIBLE: hay texto pero es COMPLETAMENTE imposible distinguir ningún dígito de la fecha tras intentar rotarla mentalmente. Usa esto solo como ÚLTIMO RECURSO.
 - SIN_FECHA: no hay absolutamente ningún texto visible en la imagen.
 {regla_extra}
@@ -509,30 +509,124 @@ def reporte_pdf(resultados,N,n,c,decision,X,sid,correcciones_count):
         cv.setFillColor(colors.HexColor("#e55353"))
         cv.drawString(ml,ly-14,f"β≤10% riesgo consumidor  NQL={nql_v:.0%}")
 
-    # P3 — No conformes
-    ncs=[l for l in resultados if l["no_conforme"]]
-    if ncs:
-        cv.showPage(); cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0,0,W,H,fill=1,stroke=0)
-        cv.setFillColor(colors.HexColor("#0d1f40")); cv.rect(0,H-50,W,50,fill=1,stroke=0)
-        cv.setFont("Helvetica-Bold",13); cv.setFillColor(colors.HexColor("#e55353"))
-        cv.drawString(1.5*cm,H-30,f"EVIDENCIA – NO CONFORMES ({len(ncs)} de {n})")
-        y=H-72
-        for lata in ncs:
-            if y<3*cm:
-                cv.showPage(); cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0,0,W,H,fill=1,stroke=0); y=H-2*cm
-            bg_col=colors.HexColor("#1a0a2a") if lata.get("corregido") else colors.HexColor("#1a0707")
-            cv.setFillColor(bg_col); cv.roundRect(1.2*cm,y-42,W-2.4*cm,44,2,fill=1,stroke=0)
-            cv.setFont("Helvetica-Bold",10); cv.setFillColor(colors.HexColor("#e55353"))
-            corr_txt=" [CORREGIDO POR CLAUDE]" if lata.get("corregido") else ""
-            cv.drawString(1.8*cm,y-4,f"Lata {lata['id']}{corr_txt}")
-            cv.setFont("Helvetica",8); cv.setFillColor(colors.HexColor("#c8d6e5"))
-            cv.drawString(1.8*cm,y-18,f"Cuerpo: {lata['cuerpo'].get('clase','?')} ({lata['cuerpo'].get('confianza',0):.0%}) [{lata['cuerpo'].get('fuente','?')}] – {lata['cuerpo'].get('descripcion','')[:55]}")
-            if lata.get("yolo_original"):
-                cv.setFillColor(colors.HexColor("#a78bfa"))
-                cv.drawString(1.8*cm,y-28,f"YOLO original: {lata['yolo_original'].get('clase','?')} ({lata['yolo_original'].get('confianza',0):.0%})")
-                cv.setFillColor(colors.HexColor("#c8d6e5"))
-            cv.drawString(1.8*cm,y-38,f"Etiqueta: {lata['etiqueta'].get('estado','?')} – {lata['etiqueta'].get('descripcion','')[:55]}")
-            y-=54
+    # ── Helpers para insertar imágenes PIL en reportlab ──────────────────
+    def _pil_to_rl(img_pil, max_w, max_h):
+        img_pil = img_pil.convert("RGB")
+        img_pil.thumbnail((int(max_w), int(max_h)), Image.LANCZOS)
+        tmp = io.BytesIO()
+        img_pil.save(tmp, format="JPEG", quality=82)
+        tmp.seek(0)
+        return tmp, img_pil.size
+
+    # P3 — EVIDENCIA COMPLETA: todas las latas con fotos
+    cv.showPage()
+    cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0,0,W,H,fill=1,stroke=0)
+    cv.setFillColor(colors.HexColor("#0d1f40")); cv.rect(0,H-50,W,50,fill=1,stroke=0)
+    cv.setFont("Helvetica-Bold",13); cv.setFillColor(colors.white)
+    cv.drawString(1.5*cm,H-30,f"EVIDENCIA FOTOGRÁFICA – TODAS LAS LATAS ({n} inspeccionadas)")
+    cv.setFont("Helvetica",9); cv.setFillColor(colors.HexColor("#5a7a9a"))
+    cv.drawString(1.5*cm,H-44,"Cuerpo (izq) · Etiqueta (der) · Verde = Conforme · Rojo = No conforme · Amarillo = Observación")
+
+    # Layout: 2 latas por fila, cada lata ocupa ancho/2
+    # Cada bloque: cabecera (20pt) + 2 fotos lado a lado (130pt alto) = ~155pt por lata
+    # 2 latas por fila = bloques de 2 columnas
+    IMG_W = (W - 3.5*cm) / 2   # ancho de cada foto
+    IMG_H = 3.8*cm              # alto de cada foto
+    BLOQUE_H = IMG_H + 1.4*cm  # alto total por lata (foto + texto)
+    COLS = 2
+    MARGEN_IZQ = 1.2*cm
+
+    y = H - 62
+    col = 0
+
+    for lata in resultados:
+        # Verificar espacio — nueva página si no cabe
+        if y - BLOQUE_H < 1.5*cm:
+            cv.showPage()
+            cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0,0,W,H,fill=1,stroke=0)
+            cv.setFillColor(colors.HexColor("#0d1f40")); cv.rect(0,H-36,W,36,fill=1,stroke=0)
+            cv.setFont("Helvetica-Bold",10); cv.setFillColor(colors.white)
+            cv.drawString(1.5*cm,H-22,"EVIDENCIA FOTOGRÁFICA (continuación)")
+            y = H - 48
+            col = 0
+
+        nc = lata["no_conforme"]
+        clase = lata["cuerpo"].get("clase","?")
+        estado = lata["etiqueta"].get("estado","?")
+        conf_c = lata["cuerpo"].get("confianza",0)
+        conf_e = lata["etiqueta"].get("confianza",0)
+
+        if nc:
+            badge_color = colors.HexColor("#e55353")
+            badge_txt = "NO CONFORME"
+            bg_lata = colors.HexColor("#1a0707")
+        elif clase == "MENOR":
+            badge_color = colors.HexColor("#f0b429")
+            badge_txt = "OBSERVACION"
+            bg_lata = colors.HexColor("#1a1507")
+        else:
+            badge_color = colors.HexColor("#27c97e")
+            badge_txt = "CONFORME"
+            bg_lata = colors.HexColor("#071507")
+
+        # Posición X según columna
+        x_bloque = MARGEN_IZQ + col * (W - 2*MARGEN_IZQ) / COLS
+        ancho_bloque = (W - 2*MARGEN_IZQ) / COLS - 0.3*cm
+
+        # Fondo del bloque
+        cv.setFillColor(bg_lata)
+        cv.roundRect(x_bloque, y - BLOQUE_H, ancho_bloque, BLOQUE_H, 3, fill=1, stroke=0)
+        cv.setStrokeColor(badge_color); cv.setLineWidth(0.8)
+        cv.roundRect(x_bloque, y - BLOQUE_H, ancho_bloque, BLOQUE_H, 3, fill=0, stroke=1)
+
+        # Cabecera del bloque
+        cv.setFont("Helvetica-Bold", 8)
+        cv.setFillColor(badge_color)
+        cv.drawString(x_bloque + 4, y - 10, f"#{lata['id']}  {badge_txt}")
+        cv.setFont("Helvetica", 6.5)
+        cv.setFillColor(colors.HexColor("#c8d6e5"))
+        info_txt = f"Cuerpo: {clase} {conf_c:.0%} | Etiqueta: {estado} {conf_e:.0%}"
+        cv.drawString(x_bloque + 4, y - 20, info_txt[:55])
+
+        # Fotos: cuerpo a la izquierda, etiqueta a la derecha
+        foto_w = (ancho_bloque - 0.4*cm) / 2
+        foto_h = IMG_H
+        y_foto = y - BLOQUE_H + 0.2*cm
+
+        for foto_idx, (img_key, label) in enumerate([("img_cuerpo","C"), ("img_etiqueta","E")]):
+            img_pil = lata.get(img_key)
+            x_foto = x_bloque + 0.1*cm + foto_idx * (foto_w + 0.2*cm)
+            if img_pil:
+                try:
+                    tmp_buf, (iw, ih) = _pil_to_rl(img_pil, foto_w * 2.835, foto_h * 2.835)
+                    from reportlab.lib.utils import ImageReader
+                    rl_img = ImageReader(tmp_buf)
+                    # Mantener proporción
+                    scale = min(foto_w / (iw / 2.835), foto_h / (ih / 2.835))
+                    draw_w = (iw / 2.835) * scale
+                    draw_h = (ih / 2.835) * scale
+                    x_center = x_foto + (foto_w - draw_w) / 2
+                    cv.drawImage(rl_img, x_center, y_foto, width=draw_w, height=draw_h,
+                                 preserveAspectRatio=True, mask="auto")
+                except Exception:
+                    cv.setFillColor(colors.HexColor("#1a2744"))
+                    cv.rect(x_foto, y_foto, foto_w, foto_h, fill=1, stroke=0)
+                    cv.setFillColor(colors.HexColor("#5a7a9a"))
+                    cv.setFont("Helvetica", 6)
+                    cv.drawCentredString(x_foto + foto_w/2, y_foto + foto_h/2, f"{label} sin imagen")
+            else:
+                cv.setFillColor(colors.HexColor("#1a2744"))
+                cv.rect(x_foto, y_foto, foto_w, foto_h, fill=1, stroke=0)
+
+        # Avanzar columna o bajar fila
+        col += 1
+        if col >= COLS:
+            col = 0
+            y -= BLOQUE_H + 0.3*cm
+
+    # Si quedó columna impar, bajar también
+    if col > 0:
+        y -= BLOQUE_H + 0.3*cm
 
     cv.save(); buf.seek(0); return buf
 
@@ -805,7 +899,10 @@ with tab_insp:
         # ── Decisión ────────────────────────────────────────────────────
         cls_d="decision-acepta" if decision=="ACEPTADO" else "decision-rechaza"
         cv_="#27c97e" if decision=="ACEPTADO" else "#e55353"
-        st.markdown(f'<div class="decision-box {cls_d}"><div class="decision-title" style="color:{cv_}">{decision}</div><div class="decision-sub">X = {X} {"≤" if decision=="ACEPTADO" else ">"} c = {c_lote}  ·  p\' = {pp:.1%}  ·  {total} latas inspeccionadas{f"  ·  🔄 {correcciones} corrección(es) de YOLO" if retro_activo and correcciones>0 else ""}</div></div>',unsafe_allow_html=True)
+        retro_txt_dec = ("  Correcciones YOLO: " + str(correcciones)) if retro_activo and correcciones>0 else ""
+        simbolo_dec = "<=" if decision=="ACEPTADO" else ">"
+        sub_txt = f"X = {X} {simbolo_dec} c = {c_lote} | p = {pp:.1%} | {total} latas {retro_txt_dec}"
+        st.markdown(f'<div class="decision-box {cls_d}"><div class="decision-title" style="color:{cv_}">{decision}</div><div class="decision-sub">{sub_txt}</div></div>',unsafe_allow_html=True)
 
         # ── Métricas ────────────────────────────────────────────────────
         cl_x="ok" if decision=="ACEPTADO" else "bad"; cv_x="met-ok" if decision=="ACEPTADO" else "met-bad"
