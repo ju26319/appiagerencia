@@ -297,38 +297,63 @@ def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
     anio_hoy = datetime.now().year
 
     if fecha_minima_str:
-        regla_vigente = f"VIGENTE: fecha encontrada e igual o posterior a {fecha_minima_str}."
-        regla_vencida = f"VENCIDA: fecha anterior a {fecha_minima_str} O anterior a hoy ({hoy})."
+        # Con fecha mínima: SOLO comparar contra la fecha mínima, NO contra hoy
+        # Esto permite aceptar fechas ya vencidas pero dentro del rango del dataset
+        regla_vigente = (
+            f"VIGENTE: fecha encontrada y es IGUAL O POSTERIOR a {fecha_minima_str}. "
+            f"No importa si la fecha ya paso hoy ({hoy}) — solo importa si es posterior a {fecha_minima_str}."
+        )
+        regla_vencida = (
+            f"VENCIDA: fecha encontrada y es ESTRICTAMENTE ANTERIOR a {fecha_minima_str}. "
+            f"Por ejemplo: si la fecha minima es 01/01/2024, entonces una fecha de DIC2023 es VENCIDA "
+            f"pero FEB2025 es VIGENTE aunque ya haya pasado hoy."
+        )
+        regla_ilegible = (
+            "ILEGIBLE: texto presente pero imposible leer ningun digito ni letra tras rotar mentalmente. "
+            "ULTIMO RECURSO — si puedes leer el anio, clasifica segun la regla anterior."
+        )
+        ejemplo = (
+            f"EJEMPLO con fecha minima {fecha_minima_str}: "
+            f"18FEB2025 → VIGENTE (posterior a {fecha_minima_str}). "
+            f"31OCT2025 → VIGENTE. 11FEB2025 → VIGENTE. "
+            f"Solo seria VENCIDA si la fecha fuera anterior a {fecha_minima_str}."
+        )
     else:
+        # Sin fecha mínima: comparar contra hoy normalmente
         regla_vigente = f"VIGENTE: fecha encontrada y posterior a hoy ({hoy})."
         regla_vencida = f"VENCIDA: fecha encontrada y anterior o igual a hoy ({hoy})."
+        regla_ilegible = (
+            "ILEGIBLE: texto presente pero imposible leer ningun digito ni letra. "
+            f"ULTIMO RECURSO — si puedes leer el anio, compara con {anio_hoy}."
+        )
+        ejemplo = ""
 
     return (
         "Eres un sistema OCR experto en leer texto grabado/estampado en metal de latas de conserva.\n\n"
 
-        "CONTEXTO: Las fechas en estas latas están grabadas en relieve sobre metal plateado. "
-        "Suelen ser pequeñas, pueden estar al revés, rotadas 90/180 grados, o en ángulo. "
-        "El formato más común es DDMMMYYYY por ejemplo 18FEB2025 o 31OCT2025. "
-        "También aparecen como MMDDYY, MM/YYYY, o YYYY-MM-DD.\n\n"
+        "CONTEXTO: Las fechas en estas latas estan grabadas en relieve sobre metal plateado. "
+        "Suelen ser pequenas, pueden estar al reves, rotadas 90/180 grados, o en angulo. "
+        "El formato mas comun es DDMMMYYYY por ejemplo 18FEB2025 o 31OCT2025. "
+        "Tambien aparecen como MMDDYY, MM/YYYY, o YYYY-MM-DD.\n\n"
 
         "PASO 1 — LOCALIZAR: Busca en TODA la imagen cualquier texto que incluya:\n"
         "  Indicadores: EXP, EXPIRY, EXPR, EXP DATE, EXP., BB, BEST BEFORE, VENCE, VENC, CAD, CONSUME ANTES\n"
-        "  Si no encuentras indicador, busca cualquier secuencia de letras+números que parezca fecha.\n\n"
+        "  Si no encuentras indicador, busca cualquier secuencia de letras+numeros que parezca fecha.\n\n"
 
         "PASO 2 — LEER: Rota mentalmente la imagen hasta que el texto tenga sentido. "
-        "Descifra letra por letra. Los meses en inglés: JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC. "
-        "En español: ENE FEB MAR ABR MAY JUN JUL AGO SEP OCT NOV DIC.\n\n"
+        "Descifra letra por letra. Meses en ingles: JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC. "
+        "En espanol: ENE FEB MAR ABR MAY JUN JUL AGO SEP OCT NOV DIC.\n\n"
 
-        "PASO 3 — CLASIFICAR usando estas reglas ESTRICTAS:\n"
+        "PASO 3 — CLASIFICAR con estas reglas:\n"
         f"  {regla_vigente}\n"
         f"  {regla_vencida}\n"
-        "  ILEGIBLE: texto presente pero ABSOLUTAMENTE imposible leer ningun digito ni letra. "
-        "USA ESTO SOLO SI NO PUEDES LEER ABSOLUTAMENTE NADA. "
-        f"Si puedes leer al menos el anio (ejemplo: 2025, 2026, 2027), clasifica como VIGENTE o VENCIDA comparando con {anio_hoy}.\n"
+        f"  {regla_ilegible}\n"
         "  SIN_FECHA: la imagen no tiene absolutamente ningun texto visible.\n\n"
 
-        "REGLA DE ORO: Es mejor dar VIGENTE o VENCIDA con confianza baja (0.50) "
-        "que dar ILEGIBLE. Solo usa ILEGIBLE si es COMPLETAMENTE imposible.\n\n"
+        + (f"{ejemplo}\n\n" if ejemplo else "")
+
+        + "REGLA DE ORO: Es mejor dar VIGENTE o VENCIDA con confianza baja (0.50) "
+        "que dar ILEGIBLE. Solo usa ILEGIBLE si es COMPLETAMENTE imposible leer algo.\n\n"
 
         "Responde SOLO con este JSON, sin texto adicional, sin markdown:\n"
         '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto leido o null","confianza":0.00,"descripcion":"que texto viste y donde"}'
@@ -349,23 +374,15 @@ def preproc(img,mn=640):
 
 def preproc_etiqueta(img, mn=800):
     """
-    Preprocesa específicamente imágenes de etiqueta:
-    - Mayor resolución (800px)
-    - Mayor contraste y nitidez para texto grabado en metal
-    - Recorta la zona central donde suele estar la fecha
+    Preprocesa imágenes de etiqueta sin recortar — el texto puede estar
+    en cualquier parte del fondo de la lata.
     """
     w,h=img.size
-    # Escalar a resolución mayor
     if min(w,h)<mn:
         f=mn/min(w,h); img=img.resize((int(w*f),int(h*f)),Image.LANCZOS)
-    # Recortar zona central (la fecha suele estar en el centro del fondo)
-    w2,h2=img.size
-    margen_w=int(w2*0.1); margen_h=int(h2*0.1)
-    img=img.crop((margen_w, margen_h, w2-margen_w, h2-margen_h))
-    # Aumentar contraste y nitidez más agresivamente para texto en metal
-    img=ImageEnhance.Contrast(img).enhance(2.0)
-    img=ImageEnhance.Sharpness(img).enhance(3.0)
-    img=ImageEnhance.Brightness(img).enhance(1.1)
+    # Contraste moderado para no destruir texto tenue
+    img=ImageEnhance.Contrast(img).enhance(1.6)
+    img=ImageEnhance.Sharpness(img).enhance(2.2)
     return img
 
 def parse_json(txt):
