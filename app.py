@@ -293,49 +293,55 @@ Responde SOLO con este JSON sin texto adicional:
 {"clase":"CRITICO|MAYOR|MENOR|CONFORME","confianza":0.00,"descripcion":"breve en español"}"""
 
 def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
-    hoy = datetime.now().strftime("%d/%m/%Y")
-    anio_hoy = datetime.now().year
-
     if fecha_minima_str:
-        regla_decision = (
-            f"DECISION: Si encuentras CUALQUIER texto que parezca fecha (numeros con letras de mes):\n"
-            f"  - Si esa fecha es posterior o igual a {fecha_minima_str} → responde VIGENTE\n"
-            f"  - Si esa fecha es anterior a {fecha_minima_str} → responde VENCIDA\n"
-            f"  - Si no puedes leer absolutamente ningun digito → responde ILEGIBLE\n"
-            f"  - Si no hay ningun texto en la imagen → responde SIN_FECHA\n"
-            f"EJEMPLOS con fecha minima {fecha_minima_str}:\n"
-            f"  18FEB2025 → VIGENTE | 31OCT2025 → VIGENTE | 11FEB2025 → VIGENTE\n"
-            f"  DEC2023 → VENCIDA | NOV2019 → VENCIDA\n"
-            f"  Texto ilegible parcial → intenta rotar 180 grados y vuelve a leer antes de decir ILEGIBLE"
+        # Extraer año mínimo de la fecha configurada
+        try:
+            anio_min = int(fecha_minima_str.split("/")[-1])
+        except:
+            anio_min = 2024
+        regla_vigencia = (
+            f"REGLA DE VIGENCIA: Si el año encontrado es {anio_min} o posterior → VIGENTE. "
+            f"Si el año es anterior a {anio_min} → VENCIDA. "
+            f"EJEMPLOS: 2025→VIGENTE, 2026→VIGENTE, 2024→{'VIGENTE' if anio_min<=2024 else 'VENCIDA'}, "
+            f"2023→VENCIDA."
         )
     else:
-        regla_decision = (
-            f"DECISION: Si encuentras CUALQUIER texto que parezca fecha (numeros con letras de mes):\n"
-            f"  - Si esa fecha es posterior a hoy ({hoy}) → responde VIGENTE\n"
-            f"  - Si esa fecha es anterior o igual a hoy → responde VENCIDA\n"
-            f"  - Si no puedes leer absolutamente ningun digito → responde ILEGIBLE\n"
-            f"  - Si no hay ningun texto en la imagen → responde SIN_FECHA"
+        regla_vigencia = (
+            "REGLA DE VIGENCIA: Si el año encontrado es 2025 o posterior → VIGENTE. "
+            "Si el año es 2024 o anterior → VENCIDA. "
+            "EJEMPLOS: 18FEB2025→VIGENTE, 31OCT2026→VIGENTE, DEC2024→VENCIDA, NOV2023→VENCIDA."
         )
 
     return (
-        "Eres un lector OCR de fechas de vencimiento en fondos de latas metalicas.\n\n"
+        "Eres un sistema OCR especializado en leer fechas de vencimiento en latas de conserva.\n\n"
 
-        "TAREA UNICA: Encontrar y leer la fecha de vencimiento grabada en el metal.\n\n"
+        "TIPO DE IMAGEN: La imagen puede ser:\n"
+        "  A) Una etiqueta lateral de papel con fecha impresa\n"
+        "  B) La tapa metalica inferior/superior de la lata con fecha ESTAMPADA EN RELIEVE sobre metal\n"
+        "  En AMBOS casos busca la fecha de vencimiento exactamente igual.\n\n"
 
-        "COMO LEER EL TEXTO EN METAL:\n"
-        "1. El texto esta grabado en relieve — puede ser muy tenue. Busca en toda la imagen.\n"
-        "2. Formato tipico: DDMMMYYYY ejemplo 18FEB2025, 31OCT2025, 11FEB2025\n"
-        "3. Indicadores: EXP, EXPIRY, EXPR, EXP DATE, BB, BEST BEFORE, VENCE, CAD\n"
-        "4. Si el texto esta al reves, rota mentalmente la imagen 180 grados y lee de nuevo.\n"
-        "5. IGNORA: nombres de marca, pais, textos decorativos (CERTIFIED, QUALITY, ARGENTINA, PRODUCT OF, YOUNGS TOWN)\n\n"
+        "COMO LEER EL TEXTO EN METAL (caso B):\n"
+        "  - El texto esta grabado en relieve sobre superficie metalica circular\n"
+        "  - Puede estar al reves o rotado — rota mentalmente 180 grados si no tiene sentido\n"
+        "  - Formato tipico: DDMMMYYYY (18FEB2025), DDMMMYY, MM/YYYY\n"
+        "  - Indicadores: EXP, EXPIRY, EXPR, EXP DATE, BB, BEST BEFORE, VENCE, CAD, TIR, BEST BY\n"
+        "  - IGNORAR: CERTIFIED, QUALITY, ARGENTINA, PRODUCT OF, YOUNGS TOWN, nombres de marca\n\n"
 
-        + regla_decision + "\n\n"
+        + regla_vigencia + "\n\n"
 
-        "IMPORTANTE: Sigue estas reglas de forma DETERMINISTICA — para la misma imagen "
-        "siempre debes dar la misma respuesta. No uses criterios subjetivos.\n\n"
+        "UMBRALES DE CONFIANZA — se MUY honesto con tu confianza:\n"
+        "  - 0.85-1.00: lees la fecha con total claridad\n"
+        "  - 0.60-0.84: lees la fecha pero hay algo de ambiguedad\n"
+        "  - 0.40-0.59: ves indicios de fecha pero no puedes confirmar el año\n"
+        "  - 0.00-0.39: no puedes leer absolutamente nada\n\n"
+
+        "CLASIFICACION FINAL (aplica en orden):\n"
+        "  1. Si lees fecha con año claro → aplica REGLA DE VIGENCIA → VIGENTE o VENCIDA\n"
+        "  2. Si ves indicios de texto pero no el año → ILEGIBLE (confianza baja 0.30-0.50)\n"
+        "  3. Si no hay absolutamente ningun texto → SIN_FECHA\n\n"
 
         "Responde SOLO con este JSON sin texto adicional:\n"
-        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto o null","confianza":0.00,"descripcion":"texto que viste"}'
+        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto o null","confianza":0.00,"descripcion":"texto que viste y donde"}'
     )
 
 PROMPT_ETIQUETA = construir_prompt_etiqueta()  # default sin fecha minima
@@ -437,11 +443,28 @@ def retroalimentar_claude(client,img,res_yolo,modelo):
     except: pass
     return None
 
-def es_nc(rc,re):
-    motivos=[]
-    if rc.get("clase") in ("CRITICO","MAYOR"): motivos.append(f"Defecto {rc['clase'].lower()}")
-    if re.get("estado") in ("VENCIDA","ILEGIBLE","SIN_FECHA"): motivos.append(f"Etiqueta: {re['estado'].lower()}")
-    return len(motivos)>0," · ".join(motivos) if motivos else "Conforme"
+# Umbrales de confianza
+_CONF_ALTA  = 0.75
+_CONF_MEDIA = 0.50
+
+def _cat_etiqueta(re):
+    estado = re.get('estado','ILEGIBLE')
+    conf   = re.get('confianza', 0.0)
+    if conf >= _CONF_ALTA:   return estado, 'confirmada'
+    elif conf >= _CONF_MEDIA: return estado, 'dudosa'
+    else:                     return 'ILEGIBLE', 'ilegible'
+
+def es_nc(rc, re):
+    motivos = []
+    if rc.get('clase') in ('CRITICO','MAYOR'):
+        motivos.append(f"Defecto {rc['clase'].lower()}")
+    estado_e, cat_e = _cat_etiqueta(re)
+    if estado_e in ('VENCIDA','SIN_FECHA'):
+        if cat_e == 'confirmada':  motivos.append(f'Etiqueta {estado_e.lower()}')
+        elif cat_e == 'dudosa':    motivos.append(f'Etiqueta {estado_e.lower()} (DUDOSA)')
+    elif estado_e == 'ILEGIBLE' and cat_e == 'confirmada':
+        motivos.append('Etiqueta ilegible (confirmado)')
+    return len(motivos)>0, ' · '.join(motivos) if motivos else 'Conforme', cat_e
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -943,11 +966,13 @@ with tab_insp:
             _prompt_e = construir_prompt_etiqueta(_fm) if _fm else PROMPT_ETIQUETA
             res_e=consenso_claude(client,img_e,_prompt_e,modelo_sel,votos_e,es_etiqueta=True)
 
-            nc,motivo=es_nc(res_c,res_e)
+            nc,motivo,cat_etiqueta=es_nc(res_c,res_e)
             if nc: X+=1
-            elif res_c.get("clase")=="MENOR": obs+=1
+            elif res_c.get("clase")=="MENOR" or cat_etiqueta in ("dudosa","ilegible"): obs+=1
+            if cat_etiqueta=="dudosa": dudosas_count+=1
 
             resultados.append({"id":lid,"cuerpo":res_c,"etiqueta":res_e,"no_conforme":nc,"motivo":motivo,
+                "cat_etiqueta":cat_etiqueta,
                 "img_cuerpo_bytes":bytes_c,"img_etiqueta_bytes":bytes_e,"corregido":corregido,"yolo_original":yolo_orig})
             # Liberar objetos PIL inmediatamente
             del img_c, img_e, bytes_c, bytes_e
