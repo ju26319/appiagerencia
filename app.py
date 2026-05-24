@@ -6,19 +6,42 @@ ISO 2859-1 · YOLOv8n + Claude Vision (retroalimentación opcional)
 import streamlit as st
 import anthropic
 import base64, io, os, json, re, time, math
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 from PIL import Image, ImageEnhance, ImageDraw
 from collections import Counter
 from datetime import datetime
 
 # ── YOLO / cv2 / numpy ────────────────────────────────────────────────────────
+import os as _os
+_os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")   # forzar CPU antes de importar torch
+_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_os.environ.setdefault("YOLO_VERBOSE", "False")
+
+YOLO_DISPONIBLE = False
+YOLO_ERROR_MSG = ""
+np = cv2 = YOLO = None
+
 try:
     import numpy as np
-    import cv2
-    from ultralytics import YOLO
     YOLO_DISPONIBLE = True
-except Exception:
-    YOLO_DISPONIBLE = False
-    np = cv2 = YOLO = None
+except Exception as _e:
+    YOLO_ERROR_MSG = f"numpy: {_e}"
+
+if YOLO_DISPONIBLE:
+    try:
+        import cv2
+    except Exception as _e:
+        YOLO_DISPONIBLE = False
+        YOLO_ERROR_MSG = f"cv2: {_e}"
+
+if YOLO_DISPONIBLE:
+    try:
+        from ultralytics import YOLO
+    except Exception as _e:
+        YOLO_DISPONIBLE = False
+        YOLO_ERROR_MSG = f"ultralytics: {_e}"
+        YOLO = None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
@@ -465,7 +488,8 @@ with st.sidebar:
         else:
             st.markdown('<div style="background:#1a1a07;border:1px solid #5a5a1a;border-left:3px solid #f0b429;border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px"><span style="color:#f0b429">⚠ YOLO: .pt NO ENCONTRADO</span><br><span style="color:#7a7a4a">Sube best_latas_defectos.pt al repo</span></div>',unsafe_allow_html=True)
     else:
-        st.markdown('<div style="background:#1a0707;border:1px solid #5a1a1a;border-left:3px solid #e55353;border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px"><span style="color:#e55353">✗ YOLO NO DISPONIBLE</span><br><span style="color:#7a4a4a">ultralytics/cv2 no instalado<br>→ Claude Vision analiza el cuerpo</span></div>',unsafe_allow_html=True)
+        err_txt = YOLO_ERROR_MSG[:60] if YOLO_ERROR_MSG else "ultralytics/cv2 no instalado"
+        st.markdown(f'<div style="background:#1a0707;border:1px solid #5a1a1a;border-left:3px solid #e55353;border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px"><span style="color:#e55353">✗ YOLO NO DISPONIBLE</span><br><span style="color:#7a4a4a">{err_txt}<br>→ Claude Vision analiza el cuerpo</span></div>',unsafe_allow_html=True)
 
     api_check=get_key()
     color_claude="#27c97e" if api_check else "#e55353"
@@ -694,6 +718,7 @@ with tab_hist:
     try:
         import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt, matplotlib.ticker as ticker
+        import warnings; warnings.filterwarnings("ignore")
         fig,ax=plt.subplots(figsize=(9,4.5))
         fig.patch.set_facecolor("#0b1120"); ax.set_facecolor("#0d1830")
         ax.fill_between(ps,pas,alpha=0.15,color="#3a7bd5")
@@ -722,7 +747,7 @@ with tab_hist:
         ax.yaxis.set_major_formatter(ticker.PercentFormatter(1.0))
         ax.grid(True,color="#1a2744",linewidth=0.5,alpha=0.7)
         ax.legend(loc="upper right",facecolor="#0d1830",edgecolor="#1a3a6a",labelcolor="#c8d6e5",fontsize=8)
-        st.pyplot(fig,use_container_width=True); plt.close(fig)
+        st.pyplot(fig); plt.close(fig)
     except ImportError:
         st.warning("Instala matplotlib para ver la CCO.",icon="⚠️")
 
@@ -733,6 +758,6 @@ with tab_hist:
         st.markdown("---"); st.markdown("#### Historial de lotes")
         st.dataframe([{"Lote":l["id"],"N":l["N"],"n":l["n"],"c":l["c"],"X":l["X"],
             "p'":f"{l['X']/l['n']:.1%}" if l["n"]>0 else "—","Decisión":l["decision"]}
-            for l in reversed(st.session_state.historial_lotes)],use_container_width=True)
+            for l in reversed(st.session_state.historial_lotes)])
 
 st.markdown('<div class="footer">ANCO S.A.S. · ISO 2859-1 · NCA 2.5% · YOLOv8n + Claude Vision · Gerencia y Control de Calidad · UNICAUCA 2026</div>',unsafe_allow_html=True)
