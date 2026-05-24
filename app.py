@@ -301,27 +301,34 @@ def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
     hoy = datetime.now().strftime("%d/%m/%Y")
     if fecha_minima_str:
         regla_vigente = (
-            f"- VIGENTE: fecha encontrada, formato válido, y la fecha es POSTERIOR a {fecha_minima_str} "
-            f"(fecha mínima de aceptación configurada por el inspector). "
-            f"Si la fecha existe pero es anterior a {fecha_minima_str}, clasifica como VENCIDA aunque no haya caducado hoy."
+            f"- VIGENTE: fecha encontrada y la fecha es IGUAL O POSTERIOR a {fecha_minima_str} "
+            f"(fecha mínima configurada, inclusive). Si la fecha es anterior a {fecha_minima_str} → VENCIDA."
         )
-        regla_extra = f"IMPORTANTE: La fecha mínima de aceptación es {fecha_minima_str}. Cualquier producto que venza antes de esa fecha NO se acepta."
+        regla_extra = f"Fecha mínima de aceptación: {fecha_minima_str}."
     else:
-        regla_vigente = f"- VIGENTE: fecha encontrada, formato válido, y la fecha es posterior a hoy ({hoy})."
+        regla_vigente = f"- VIGENTE: fecha encontrada y la fecha es posterior a hoy ({hoy})."
         regla_extra = ""
-    return f"""Eres un inspector de etiquetas y fechas de vencimiento de conservas enlatadas.
-Busca: VENCE, EXP, BEST BEFORE, BB, CAD, CONSUME ANTES DE, FECHA LÍMITE.
-Formatos: DD/MM/AAAA, MM/AAAA, DD-MM-AA, AAAA-MM-DD.
-Si hay múltiples fechas, usa la de vencimiento (no fabricación/LOT).
-Fecha de hoy: {hoy}
+    return f"""Eres un sistema OCR especializado en leer fechas de vencimiento en tapas y fondos de latas de conserva.
+
+INSTRUCCIONES DE LECTURA:
+1. El texto puede estar grabado/estampado en el metal, ser pequeño y estar al revés o en ángulo — rota mentalmente la imagen.
+2. Busca cualquiera de estos indicadores: EXP, EXPIRY, EXPR, EXP DATE, EXP., VENCE, VENC, BB, BEST BEFORE, CAD, CONSUME ANTES, FECHA LIM.
+3. Formatos comunes en estas latas: DDMMMYYYY (18FEB2025), DDMMMYY, MM/YYYY, DD/MM/YYYY, MMDDYY, YYYYMMDD.
+4. El texto puede estar fragmentado en 2 líneas: primera línea = código de lote, segunda línea = fecha.
+5. Si ves números que parecen una fecha aunque no tengas el indicador completo, intenta leerla igual.
+6. Ignora el código de lote (LOT, LOTE, L/N, números largos tipo 9FKYT0209).
+
+REGLAS DE CLASIFICACIÓN:
 {regla_vigente}
-- VENCIDA: fecha anterior o igual a hoy, O anterior a la fecha mínima de aceptación.
-- ILEGIBLE: hay indicios de fecha pero no se puede leer.
-- SIN_FECHA: no se encuentra fecha.
+- VENCIDA: fecha leída con certeza y es anterior a hoy{f", O estrictamente anterior a {fecha_minima_str} (sin incluirla)" if fecha_minima_str else ""}.
+- ILEGIBLE: hay texto pero es COMPLETAMENTE imposible distinguir ningún dígito de la fecha tras intentar rotarla mentalmente. Usa esto solo como ÚLTIMO RECURSO.
+- SIN_FECHA: no hay absolutamente ningún texto visible en la imagen.
 {regla_extra}
-Ante duda entre VIGENTE y VENCIDA → VENCIDA (precaución).
+
+IMPORTANTE: Prefiere VIGENTE o VENCIDA sobre ILEGIBLE siempre que puedas inferir aunque sea el año. Si lees "FEB2025" aunque falte el día → es suficiente para clasificar. Si ves "2026" o "2027" en cualquier parte → probablemente VIGENTE.
+
 Responde SOLO con este JSON sin texto adicional:
-{{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto o null","confianza":0.00,"descripcion":"breve en español"}}"""
+{{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto leído o null","confianza":0.00,"descripcion":"breve en español"}}"""
 
 PROMPT_ETIQUETA = construir_prompt_etiqueta()  # default sin fecha mínima
 
