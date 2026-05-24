@@ -292,18 +292,38 @@ Ante la duda elige la MÁS GRAVE.
 Responde SOLO con este JSON sin texto adicional:
 {"clase":"CRITICO|MAYOR|MENOR|CONFORME","confianza":0.00,"descripcion":"breve en español"}"""
 
-PROMPT_ETIQUETA = """Eres un inspector de etiquetas y fechas de vencimiento de conservas enlatadas.
+def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
+    """
+    Construye el prompt de etiqueta con la fecha mínima de aceptación.
+    fecha_minima_str: 'DD/MM/AAAA' — si la fecha de vencimiento es ANTES de esta fecha,
+                      se clasifica como VENCIDA aunque no esté vencida hoy.
+    """
+    hoy = datetime.now().strftime("%d/%m/%Y")
+    if fecha_minima_str:
+        regla_vigente = (
+            f"- VIGENTE: fecha encontrada, formato válido, y la fecha es POSTERIOR a {fecha_minima_str} "
+            f"(fecha mínima de aceptación configurada por el inspector). "
+            f"Si la fecha existe pero es anterior a {fecha_minima_str}, clasifica como VENCIDA aunque no haya caducado hoy."
+        )
+        regla_extra = f"IMPORTANTE: La fecha mínima de aceptación es {fecha_minima_str}. Cualquier producto que venza antes de esa fecha NO se acepta."
+    else:
+        regla_vigente = f"- VIGENTE: fecha encontrada, formato válido, y la fecha es posterior a hoy ({hoy})."
+        regla_extra = ""
+    return f"""Eres un inspector de etiquetas y fechas de vencimiento de conservas enlatadas.
 Busca: VENCE, EXP, BEST BEFORE, BB, CAD, CONSUME ANTES DE, FECHA LÍMITE.
 Formatos: DD/MM/AAAA, MM/AAAA, DD-MM-AA, AAAA-MM-DD.
 Si hay múltiples fechas, usa la de vencimiento (no fabricación/LOT).
-Fecha de hoy: """ + datetime.now().strftime("%d/%m/%Y") + """
-- VIGENTE: fecha posterior a hoy.
-- VENCIDA: fecha anterior o igual a hoy.
+Fecha de hoy: {hoy}
+{regla_vigente}
+- VENCIDA: fecha anterior o igual a hoy, O anterior a la fecha mínima de aceptación.
 - ILEGIBLE: hay indicios de fecha pero no se puede leer.
 - SIN_FECHA: no se encuentra fecha.
+{regla_extra}
 Ante duda entre VIGENTE y VENCIDA → VENCIDA (precaución).
 Responde SOLO con este JSON sin texto adicional:
-{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto o null","confianza":0.00,"descripcion":"breve en español"}"""
+{{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto o null","confianza":0.00,"descripcion":"breve en español"}}"""
+
+PROMPT_ETIQUETA = construir_prompt_etiqueta()  # default sin fecha mínima
 
 def pil_b64(img,q=92):
     buf=io.BytesIO(); img.convert("RGB").save(buf,format="JPEG",quality=q)
@@ -557,6 +577,41 @@ with st.sidebar:
 
 
     st.markdown("---")
+    st.markdown("**📅 Vigencia mínima de etiqueta**")
+    usar_fecha_min = st.checkbox("Activar fecha mínima de aceptación", value=False,
+        help="Si está activo, solo se aceptan latas cuya fecha de vencimiento sea posterior a la fecha configurada.")
+    if usar_fecha_min:
+        col_fm1, col_fm2, col_fm3 = st.columns(3)
+        with col_fm1:
+            dia_min = st.number_input("Día", min_value=1, max_value=31, value=datetime.now().day, step=1, key="dia_min")
+        with col_fm2:
+            mes_min = st.number_input("Mes", min_value=1, max_value=12, value=datetime.now().month, step=1, key="mes_min")
+        with col_fm3:
+            anio_min = st.number_input("Año", min_value=2024, max_value=2040, value=datetime.now().year + 1, step=1, key="anio_min")
+        try:
+            fecha_minima = datetime(int(anio_min), int(mes_min), int(dia_min))
+            fecha_minima_str = fecha_minima.strftime("%d/%m/%Y")
+            dias_desde_hoy = (fecha_minima - datetime.now()).days
+            if dias_desde_hoy > 0:
+                st.markdown(
+                    f'<div style="background:#0d0a1a;border:1px solid #3a2a5a;border-left:3px solid #a78bfa;'
+                    f'border-radius:4px;padding:8px 10px;font-size:11px;font-family:monospace;color:#a78bfa;margin-top:6px">'
+                    f'Aceptar solo si vence después del<br>'
+                    f'<b style="color:#f0b429;font-size:13px">{fecha_minima_str}</b><br>'
+                    f'<span style="color:#6a5a8a">({dias_desde_hoy} días desde hoy)</span>'
+                    f'</div>', unsafe_allow_html=True)
+            else:
+                st.warning("La fecha mínima debe ser posterior a hoy.", icon="⚠️")
+                fecha_minima_str = None
+        except ValueError:
+            st.error("Fecha inválida.", icon="❌")
+            fecha_minima_str = None
+    else:
+        fecha_minima_str = None
+
+    st.session_state["fecha_minima_str"] = fecha_minima_str
+
+    st.markdown("---")
     mostrar_fotos=st.checkbox("Mostrar fotos en resultados",value=True)
 
     st.markdown("---")
@@ -643,8 +698,16 @@ with tab_plan:
         st.markdown("**Defectos de cuerpo (YOLOv8n)**")
         st.markdown("| Clase | NC |\n|---|---|\n| CRÍTICO | ✅ Sí |\n| MAYOR | ✅ Sí |\n| MENOR | ⚠️ Obs |\n| CONFORME | ❌ No |")
     with col_r2:
+        _fm_activa = st.session_state.get("fecha_minima_str")
         st.markdown("**Defectos de etiqueta (Claude Vision)**")
-        st.markdown("| Estado | NC |\n|---|---|\n| VENCIDA | ✅ Sí |\n| ILEGIBLE | ✅ Sí |\n| SIN_FECHA | ✅ Sí |\n| VIGENTE | ❌ No |")
+        if _fm_activa:
+            st.markdown(
+                f'<div style="background:#0d1a2a;border:1px solid #1a3a5a;border-left:3px solid #f0b429;'
+                f'border-radius:4px;padding:8px 12px;font-size:12px;font-family:monospace;margin-bottom:8px">'
+                f'📅 Fecha mínima activa: <b style="color:#f0b429">{_fm_activa}</b><br>'
+                f'<span style="color:#5a7a9a">Latas que venzan antes de esta fecha → NO CONFORME</span>'
+                f'</div>', unsafe_allow_html=True)
+        st.markdown("| Estado | NC |\n|---|---|\n| VENCIDA o antes de fecha mín. | ✅ Sí |\n| ILEGIBLE | ✅ Sí |\n| SIN_FECHA | ✅ Sí |\n| VIGENTE (después de fecha mín.) | ❌ No |")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 – INSPECCIÓN
@@ -721,7 +784,9 @@ with tab_insp:
             # ── Claude analiza etiqueta ──────────────────────────────────
             votos_e=1 if yolo_ok and not retro_activo else intentos
             status.markdown(f"`[{lid}]` 🏷️ Claude analizando etiqueta...")
-            res_e=consenso_claude(client,img_e,PROMPT_ETIQUETA,modelo_sel,votos_e)
+            _fm = st.session_state.get("fecha_minima_str")
+            _prompt_e = construir_prompt_etiqueta(_fm) if _fm else PROMPT_ETIQUETA
+            res_e=consenso_claude(client,img_e,_prompt_e,modelo_sel,votos_e)
 
             nc,motivo=es_nc(res_c,res_e)
             if nc: X+=1
