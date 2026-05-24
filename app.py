@@ -140,7 +140,10 @@ def riesgos(n,c,nca=0.025,bo=0.10):
 # ══════════════════════════════════════════════════════════════════════════════
 # YOLO
 # ══════════════════════════════════════════════════════════════════════════════
-YOLO_PATH     = "best_latas_defectos.onnx"
+# Busca ONNX primero (liviano), luego .pt como fallback
+import os as _os2
+YOLO_PATH = "best_latas_defectos.onnx" if _os2.path.exists("best_latas_defectos.onnx") else "best_latas_defectos.pt"
+YOLO_ES_ONNX = YOLO_PATH.endswith(".onnx")
 YOLO_CONF_THR = 0.50
 YOLO_IMGSZ    = 416
 YOLO_CLASES   = {"Critical Defect":"CRITICO","Major Defect":"MAYOR","Minor Defect":"MENOR","No defect":"CONFORME"}
@@ -148,13 +151,21 @@ YOLO_NOMBRES  = {0:"Critical Defect", 1:"Major Defect", 2:"Minor Defect", 3:"No 
 
 @st.cache_resource
 def cargar_yolo():
-    if not YOLO_DISPONIBLE or ort is None: return None
+    if not YOLO_DISPONIBLE: return None
     if not os.path.exists(YOLO_PATH): return None
-    try:
-        sess = ort.InferenceSession(YOLO_PATH, providers=["CPUExecutionProvider"])
-        return sess
-    except Exception as e:
-        return None
+    if YOLO_ES_ONNX:
+        if ort is None: return None
+        try:
+            return ort.InferenceSession(YOLO_PATH, providers=["CPUExecutionProvider"])
+        except Exception:
+            return None
+    else:
+        # Fallback: intentar cargar .pt con ultralytics
+        try:
+            from ultralytics import YOLO as _YOLO
+            return _YOLO(YOLO_PATH)
+        except Exception:
+            return None
 
 def _nms(boxes, scores, iou_thr=0.45):
     if len(boxes)==0: return []
@@ -169,9 +180,30 @@ def _nms(boxes, scores, iou_thr=0.45):
         order=order[1:][iou<=iou_thr]
     return keep
 
-def analizar_yolo(sess, img: Image.Image) -> dict:
+def analizar_yolo(modelo, img: Image.Image) -> dict:
     if not YOLO_DISPONIBLE or np is None:
         return {"clase":"ERROR","confianza":0.0,"descripcion":"ONNX no disponible","boxes":[],"fuente":"YOLO"}
+    # Si es modelo ultralytics (.pt) usar su API directamente
+    if not YOLO_ES_ONNX:
+        try:
+            img_np = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+            results = modelo(img_np, imgsz=YOLO_IMGSZ, conf=YOLO_CONF_THR, verbose=False)
+            dets=[]
+            for r in results:
+                for box in r.boxes:
+                    cid=int(box.cls[0]); cn=modelo.names[cid]; cf=float(box.conf[0])
+                    x1,y1,x2,y2=map(int,box.xyxy[0].tolist())
+                    dets.append({"clase_raw":cn,"clase":YOLO_CLASES.get(cn,"CONFORME"),"confianza":round(cf,3),"box":(x1,y1,x2,y2)})
+            if not dets:
+                return {"clase":"CONFORME","confianza":0.92,"descripcion":"Sin defectos detectados","boxes":[],"fuente":"YOLO(.pt)"}
+            prio={"CRITICO":4,"MAYOR":3,"MENOR":2,"CONFORME":1,"ERROR":0}
+            dets.sort(key=lambda d:(prio.get(d["clase"],0),d["confianza"]),reverse=True)
+            m=dets[0]
+            return {"clase":m["clase"],"confianza":m["confianza"],"descripcion":f"{m['clase_raw']} {m['confianza']:.0%}","boxes":[(d["box"],d["clase"],d["confianza"]) for d in dets],"fuente":"YOLO(.pt)"}
+        except Exception as e:
+            return {"clase":"ERROR","confianza":0.0,"descripcion":f"Error .pt: {e}","boxes":[],"fuente":"YOLO(.pt)"}
+    # ONNX path
+    sess = modelo
     W,H=img.size
     # Preprocesar: resize 416x416, normalizar, NCHW
     img_r=img.convert("RGB").resize((YOLO_IMGSZ,YOLO_IMGSZ),Image.LANCZOS)
