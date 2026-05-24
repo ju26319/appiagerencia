@@ -20,7 +20,7 @@ _os.environ.setdefault("YOLO_VERBOSE", "False")
 
 YOLO_DISPONIBLE = False
 YOLO_ERROR_MSG = ""
-np = cv2 = YOLO = None
+np = cv2 = ort = None
 
 try:
     import numpy as np
@@ -37,11 +37,11 @@ if YOLO_DISPONIBLE:
 
 if YOLO_DISPONIBLE:
     try:
-        from ultralytics import YOLO
+        import onnxruntime as ort
     except Exception as _e:
         YOLO_DISPONIBLE = False
-        YOLO_ERROR_MSG = f"ultralytics: {_e}"
-        YOLO = None
+        YOLO_ERROR_MSG = f"onnxruntime: {_e}"
+        ort = None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
@@ -140,39 +140,71 @@ def riesgos(n,c,nca=0.025,bo=0.10):
 # ══════════════════════════════════════════════════════════════════════════════
 # YOLO
 # ══════════════════════════════════════════════════════════════════════════════
-YOLO_PATH     = "best_latas_defectos.pt"
+YOLO_PATH     = "best_latas_defectos.onnx"
 YOLO_CONF_THR = 0.50
 YOLO_IMGSZ    = 416
 YOLO_CLASES   = {"Critical Defect":"CRITICO","Major Defect":"MAYOR","Minor Defect":"MENOR","No defect":"CONFORME"}
+YOLO_NOMBRES  = {0:"Critical Defect", 1:"Major Defect", 2:"Minor Defect", 3:"No defect"}
 
 @st.cache_resource
 def cargar_yolo():
-    if not YOLO_DISPONIBLE or YOLO is None: return None
+    if not YOLO_DISPONIBLE or ort is None: return None
     if not os.path.exists(YOLO_PATH): return None
-    try: return YOLO(YOLO_PATH)
-    except: return None
-
-def analizar_yolo(model, img: Image.Image) -> dict:
-    if not YOLO_DISPONIBLE or cv2 is None or np is None:
-        return {"clase":"ERROR","confianza":0.0,"descripcion":"YOLO no disponible","boxes":[],"fuente":"YOLO"}
-    img_np = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
     try:
-        results = model(img_np, imgsz=YOLO_IMGSZ, conf=YOLO_CONF_THR, verbose=False)
+        sess = ort.InferenceSession(YOLO_PATH, providers=["CPUExecutionProvider"])
+        return sess
     except Exception as e:
-        return {"clase":"ERROR","confianza":0.0,"descripcion":f"Error: {e}","boxes":[],"fuente":"YOLO"}
-    dets=[]
-    for r in results:
-        for box in r.boxes:
-            cid=int(box.cls[0]); cn=model.names[cid]; cf=float(box.conf[0])
-            x1,y1,x2,y2=map(int,box.xyxy[0].tolist())
-            dets.append({"clase_raw":cn,"clase":YOLO_CLASES.get(cn,"CONFORME"),"confianza":round(cf,3),"box":(x1,y1,x2,y2)})
-    if not dets:
+        return None
+
+def _nms(boxes, scores, iou_thr=0.45):
+    if len(boxes)==0: return []
+    x1,y1,x2,y2=boxes[:,0],boxes[:,1],boxes[:,2],boxes[:,3]
+    areas=(x2-x1)*(y2-y1); order=scores.argsort()[::-1]; keep=[]
+    while order.size>0:
+        i=order[0]; keep.append(i)
+        xx1=np.maximum(x1[i],x1[order[1:]]); yy1=np.maximum(y1[i],y1[order[1:]])
+        xx2=np.minimum(x2[i],x2[order[1:]]); yy2=np.minimum(y2[i],y2[order[1:]])
+        inter=np.maximum(0,xx2-xx1)*np.maximum(0,yy2-yy1)
+        iou=inter/(areas[i]+areas[order[1:]]-inter+1e-6)
+        order=order[1:][iou<=iou_thr]
+    return keep
+
+def analizar_yolo(sess, img: Image.Image) -> dict:
+    if not YOLO_DISPONIBLE or np is None:
+        return {"clase":"ERROR","confianza":0.0,"descripcion":"ONNX no disponible","boxes":[],"fuente":"YOLO"}
+    W,H=img.size
+    # Preprocesar: resize 416x416, normalizar, NCHW
+    img_r=img.convert("RGB").resize((YOLO_IMGSZ,YOLO_IMGSZ),Image.LANCZOS)
+    inp=np.array(img_r,dtype=np.float32)/255.0
+    inp=inp.transpose(2,0,1)[np.newaxis]
+    try:
+        iname=sess.get_inputs()[0].name
+        raw=sess.run(None,{iname:inp})[0]  # [1, 8, anchors]
+    except Exception as e:
+        return {"clase":"ERROR","confianza":0.0,"descripcion":f"Error ONNX: {e}","boxes":[],"fuente":"YOLO"}
+    pred=raw[0].T  # (anchors, 8) = 4coords + 4clases
+    boxes_l,scores_l,cids_l=[],[],[]
+    for row in pred:
+        cs=row[4:]; cid=int(np.argmax(cs)); cf=float(cs[cid])
+        if cf<YOLO_CONF_THR: continue
+        cx,cy,w,h=row[:4]
+        x1=int((cx-w/2)/YOLO_IMGSZ*W); y1=int((cy-h/2)/YOLO_IMGSZ*H)
+        x2=int((cx+w/2)/YOLO_IMGSZ*W); y2=int((cy+h/2)/YOLO_IMGSZ*H)
+        x1,y1=max(0,x1),max(0,y1); x2,y2=min(W,x2),min(H,y2)
+        boxes_l.append([x1,y1,x2,y2]); scores_l.append(cf); cids_l.append(cid)
+    if not boxes_l:
         return {"clase":"CONFORME","confianza":0.92,"descripcion":"Sin defectos detectados","boxes":[],"fuente":"YOLO"}
+    ba=np.array(boxes_l); sa=np.array(scores_l)
+    keep=_nms(ba,sa)
+    dets=[]
+    for i in keep:
+        cn=YOLO_NOMBRES.get(cids_l[i],"No defect")
+        dets.append({"clase_raw":cn,"clase":YOLO_CLASES.get(cn,"CONFORME"),"confianza":round(float(sa[i]),3),"box":tuple(ba[i].tolist())})
     prio={"CRITICO":4,"MAYOR":3,"MENOR":2,"CONFORME":1,"ERROR":0}
     dets.sort(key=lambda d:(prio.get(d["clase"],0),d["confianza"]),reverse=True)
     m=dets[0]
     desc={"CRITICO":f"Defecto crítico ({m['clase_raw']}) {m['confianza']:.0%}","MAYOR":f"Defecto mayor ({m['clase_raw']}) {m['confianza']:.0%}","MENOR":f"Defecto menor ({m['clase_raw']}) {m['confianza']:.0%}","CONFORME":f"Conforme {m['confianza']:.0%}"}
-    return {"clase":m["clase"],"confianza":m["confianza"],"descripcion":desc.get(m["clase"],""),"boxes":[(d["box"],d["clase"],d["confianza"]) for d in dets],"fuente":"YOLO"}
+    return {"clase":m["clase"],"confianza":m["confianza"],"descripcion":desc.get(m["clase"],""),"boxes":[(tuple(d["box"]),d["clase"],d["confianza"]) for d in dets],"fuente":"YOLO"}
 
 def dibujar_boxes(img,boxes):
     out=img.copy().convert("RGB"); draw=ImageDraw.Draw(out)
@@ -488,7 +520,7 @@ with st.sidebar:
         else:
             st.markdown('<div style="background:#1a1a07;border:1px solid #5a5a1a;border-left:3px solid #f0b429;border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px"><span style="color:#f0b429">⚠ YOLO: .pt NO ENCONTRADO</span><br><span style="color:#7a7a4a">Sube best_latas_defectos.pt al repo</span></div>',unsafe_allow_html=True)
     else:
-        err_txt = YOLO_ERROR_MSG[:60] if YOLO_ERROR_MSG else "ultralytics/cv2 no instalado"
+        err_txt = YOLO_ERROR_MSG[:60] if YOLO_ERROR_MSG else "onnxruntime/cv2 no instalado"
         st.markdown(f'<div style="background:#1a0707;border:1px solid #5a1a1a;border-left:3px solid #e55353;border-radius:4px;padding:8px 12px;font-family:monospace;font-size:12px"><span style="color:#e55353">✗ YOLO NO DISPONIBLE</span><br><span style="color:#7a4a4a">{err_txt}<br>→ Claude Vision analiza el cuerpo</span></div>',unsafe_allow_html=True)
 
     api_check=get_key()
