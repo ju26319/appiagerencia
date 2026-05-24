@@ -293,44 +293,48 @@ Responde SOLO con este JSON sin texto adicional:
 {"clase":"CRITICO|MAYOR|MENOR|CONFORME","confianza":0.00,"descripcion":"breve en español"}"""
 
 def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
-    """
-    Construye el prompt de etiqueta con la fecha mínima de aceptación.
-    fecha_minima_str: 'DD/MM/AAAA' — si la fecha de vencimiento es ANTES de esta fecha,
-                      se clasifica como VENCIDA aunque no esté vencida hoy.
-    """
     hoy = datetime.now().strftime("%d/%m/%Y")
+    anio_hoy = datetime.now().year
+
     if fecha_minima_str:
-        regla_vigente = (
-            f"- VIGENTE: fecha encontrada y la fecha es IGUAL O POSTERIOR a {fecha_minima_str} "
-            f"(fecha mínima configurada, inclusive). Si la fecha es anterior a {fecha_minima_str} → VENCIDA."
-        )
-        regla_extra = f"Fecha mínima de aceptación: {fecha_minima_str}."
+        regla_vigente = f"VIGENTE: fecha encontrada e igual o posterior a {fecha_minima_str}."
+        regla_vencida = f"VENCIDA: fecha anterior a {fecha_minima_str} O anterior a hoy ({hoy})."
     else:
-        regla_vigente = f"- VIGENTE: fecha encontrada y la fecha es posterior a hoy ({hoy})."
-        regla_extra = ""
-    return f"""Eres un sistema OCR especializado en leer fechas de vencimiento en tapas y fondos de latas de conserva.
+        regla_vigente = f"VIGENTE: fecha encontrada y posterior a hoy ({hoy})."
+        regla_vencida = f"VENCIDA: fecha encontrada y anterior o igual a hoy ({hoy})."
 
-INSTRUCCIONES DE LECTURA:
-1. El texto puede estar grabado/estampado en el metal, ser pequeño y estar al revés o en ángulo — rota mentalmente la imagen.
-2. Busca cualquiera de estos indicadores: EXP, EXPIRY, EXPR, EXP DATE, EXP., VENCE, VENC, BB, BEST BEFORE, CAD, CONSUME ANTES, FECHA LIM.
-3. Formatos comunes en estas latas: DDMMMYYYY (18FEB2025), DDMMMYY, MM/YYYY, DD/MM/YYYY, MMDDYY, YYYYMMDD.
-4. El texto puede estar fragmentado en 2 líneas: primera línea = código de lote, segunda línea = fecha.
-5. Si ves números que parecen una fecha aunque no tengas el indicador completo, intenta leerla igual.
-6. Ignora el código de lote (LOT, LOTE, L/N, números largos tipo 9FKYT0209).
+    return (
+        "Eres un sistema OCR experto en leer texto grabado/estampado en metal de latas de conserva.\n\n"
 
-REGLAS DE CLASIFICACIÓN:
-{regla_vigente}
-- VENCIDA: fecha leida con certeza y es anterior a hoy. Si hay fecha minima configurada, tambien es VENCIDA si es anterior a dicha fecha.
-- ILEGIBLE: hay texto pero es COMPLETAMENTE imposible distinguir ningún dígito de la fecha tras intentar rotarla mentalmente. Usa esto solo como ÚLTIMO RECURSO.
-- SIN_FECHA: no hay absolutamente ningún texto visible en la imagen.
-{regla_extra}
+        "CONTEXTO: Las fechas en estas latas están grabadas en relieve sobre metal plateado. "
+        "Suelen ser pequeñas, pueden estar al revés, rotadas 90/180 grados, o en ángulo. "
+        "El formato más común es DDMMMYYYY por ejemplo 18FEB2025 o 31OCT2025. "
+        "También aparecen como MMDDYY, MM/YYYY, o YYYY-MM-DD.\n\n"
 
-IMPORTANTE: Prefiere VIGENTE o VENCIDA sobre ILEGIBLE siempre que puedas inferir aunque sea el año. Si lees "FEB2025" aunque falte el día → es suficiente para clasificar. Si ves "2026" o "2027" en cualquier parte → probablemente VIGENTE.
+        "PASO 1 — LOCALIZAR: Busca en TODA la imagen cualquier texto que incluya:\n"
+        "  Indicadores: EXP, EXPIRY, EXPR, EXP DATE, EXP., BB, BEST BEFORE, VENCE, VENC, CAD, CONSUME ANTES\n"
+        "  Si no encuentras indicador, busca cualquier secuencia de letras+números que parezca fecha.\n\n"
 
-Responde SOLO con este JSON sin texto adicional:
-{{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto leído o null","confianza":0.00,"descripcion":"breve en español"}}"""
+        "PASO 2 — LEER: Rota mentalmente la imagen hasta que el texto tenga sentido. "
+        "Descifra letra por letra. Los meses en inglés: JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC. "
+        "En español: ENE FEB MAR ABR MAY JUN JUL AGO SEP OCT NOV DIC.\n\n"
 
-PROMPT_ETIQUETA = construir_prompt_etiqueta()  # default sin fecha mínima
+        "PASO 3 — CLASIFICAR usando estas reglas ESTRICTAS:\n"
+        f"  {regla_vigente}\n"
+        f"  {regla_vencida}\n"
+        "  ILEGIBLE: texto presente pero ABSOLUTAMENTE imposible leer ningun digito ni letra. "
+        "USA ESTO SOLO SI NO PUEDES LEER ABSOLUTAMENTE NADA. "
+        f"Si puedes leer al menos el anio (ejemplo: 2025, 2026, 2027), clasifica como VIGENTE o VENCIDA comparando con {anio_hoy}.\n"
+        "  SIN_FECHA: la imagen no tiene absolutamente ningun texto visible.\n\n"
+
+        "REGLA DE ORO: Es mejor dar VIGENTE o VENCIDA con confianza baja (0.50) "
+        "que dar ILEGIBLE. Solo usa ILEGIBLE si es COMPLETAMENTE imposible.\n\n"
+
+        "Responde SOLO con este JSON, sin texto adicional, sin markdown:\n"
+        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto leido o null","confianza":0.00,"descripcion":"que texto viste y donde"}'
+    )
+
+PROMPT_ETIQUETA = construir_prompt_etiqueta()  # default sin fecha minima
 
 def pil_b64(img,q=92):
     buf=io.BytesIO(); img.convert("RGB").save(buf,format="JPEG",quality=q)
