@@ -454,9 +454,10 @@ def _cat_etiqueta(re):
     elif conf >= _CONF_MEDIA: return estado, 'dudosa'
     else:                     return 'ILEGIBLE', 'ilegible'
 
-def es_nc(rc, re):
+def es_nc(rc, re, modo_estricto=False):
     motivos = []
-    if rc.get('clase') in ('CRITICO','MAYOR'):
+    clases_nc = ('CRITICO','MAYOR','MENOR') if modo_estricto else ('CRITICO','MAYOR')
+    if rc.get('clase') in clases_nc:
         motivos.append(f"Defecto {rc['clase'].lower()}")
     estado_e, cat_e = _cat_etiqueta(re)
     if estado_e in ('VENCIDA','SIN_FECHA'):
@@ -750,6 +751,33 @@ with st.sidebar:
 
 
     st.markdown("---")
+    st.markdown("**🎯 Modo de inspección**")
+    modo_inspeccion = st.radio(
+        "Nivel de strictness",
+        ["🟡 Normal (MENOR = Observación)", "🔴 Estricto (MENOR = No conforme)"],
+        index=0,
+        help="Normal: defectos menores de cuerpo son advertencia, no cuentan como NC. "
+             "Estricto: cualquier defecto (incluido MENOR) cuenta como NC.",
+        horizontal=False,
+    )
+    modo_estricto = modo_inspeccion.startswith("🔴")
+    st.session_state["modo_estricto"] = modo_estricto
+    if modo_estricto:
+        st.markdown(
+            '<div style="background:#1a0707;border:1px solid #5a1a1a;border-left:3px solid #e55353;'
+            'border-radius:4px;padding:8px 10px;font-size:11px;font-family:monospace;margin-top:4px">'
+            '<span style="color:#e55353">● MODO ESTRICTO</span><br>'
+            '<span style="color:#7a4a4a">MENOR cuenta como NO CONFORME</span>'
+            '</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(
+            '<div style="background:#1a1507;border:1px solid #5a4010;border-left:3px solid #f0b429;'
+            'border-radius:4px;padding:8px 10px;font-size:11px;font-family:monospace;margin-top:4px">'
+            '<span style="color:#f0b429">● MODO NORMAL</span><br>'
+            '<span style="color:#7a6a4a">MENOR = Observacion (no cuenta en X)</span>'
+            '</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
     st.markdown("**📅 Vigencia mínima de etiqueta**")
     usar_fecha_min = st.checkbox("Activar fecha mínima de aceptación", value=False,
         help="Solo se aceptan latas cuya fecha de vencimiento sea posterior a la fecha configurada.")
@@ -811,9 +839,10 @@ with st.sidebar:
 # HERO
 # ══════════════════════════════════════════════════════════════════════════════
 retro_txt=" · 🔄 Retroalimentación activa" if retro_activo else ""
+modo_txt=" · 🔴 Modo Estricto" if st.session_state.get("modo_estricto",False) else ""
 st.markdown(
     f'<div class="hero"><div class="hero-title">🥫 SISTEMA DE INSPECCIÓN DE LOTES – ANCO S.A.S.</div>'
-    f'<p class="hero-sub">ISO 2859-1 · NCA 2.5% · YOLOv8n (cuerpo) + Claude Vision (etiqueta){retro_txt} · Gerencia y Control de Calidad</p></div>',
+    f'<p class="hero-sub">ISO 2859-1 · NCA 2.5% · YOLOv8n (cuerpo) + Claude Vision (etiqueta){retro_txt}{modo_txt} · Gerencia y Control de Calidad</p></div>',
     unsafe_allow_html=True)
 
 api_key=get_key(); client=make_client(api_key)
@@ -861,7 +890,9 @@ with tab_plan:
     col_r1,col_r2=st.columns(2)
     with col_r1:
         st.markdown("**Defectos de cuerpo (YOLOv8n)**")
-        st.markdown("| Clase | NC |\n|---|---|\n| CRÍTICO | ✅ Sí |\n| MAYOR | ✅ Sí |\n| MENOR | ⚠️ Obs |\n| CONFORME | ❌ No |")
+        _modo_e = st.session_state.get("modo_estricto", False)
+        _menor_txt = "✅ Sí" if _modo_e else "⚠️ Obs"
+        st.markdown(f"| Clase | NC |\n|---|---|\n| CRÍTICO | ✅ Sí |\n| MAYOR | ✅ Sí |\n| MENOR | {_menor_txt} |\n| CONFORME | ❌ No |")
     with col_r2:
         _fm_activa = st.session_state.get("fecha_minima_str")
         st.markdown("**Defectos de etiqueta (Claude Vision)**")
@@ -966,7 +997,8 @@ with tab_insp:
             _prompt_e = construir_prompt_etiqueta(_fm) if _fm else PROMPT_ETIQUETA
             res_e=consenso_claude(client,img_e,_prompt_e,modelo_sel,votos_e,es_etiqueta=True)
 
-            nc,motivo,cat_etiqueta=es_nc(res_c,res_e)
+            _modo_estricto=st.session_state.get('modo_estricto',False)
+            nc,motivo,cat_etiqueta=es_nc(res_c,res_e,_modo_estricto)
             if nc: X+=1
             elif res_c.get("clase")=="MENOR" or cat_etiqueta in ("dudosa","ilegible"): obs+=1
             if cat_etiqueta=="dudosa": dudosas_count+=1
