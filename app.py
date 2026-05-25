@@ -693,7 +693,7 @@ def es_nc(rc, re, modo_estricto=False):
 # ══════════════════════════════════════════════════════════════════════════════
 # REPORTE PDF
 # ══════════════════════════════════════════════════════════════════════════════
-def reporte_pdf(resultados, N, n, c, decision, X, sid, correcciones_count):
+def reporte_pdf(resultados, N, n, c, decision, X, sid, correcciones_count, config=None):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
     from reportlab.lib.units import cm
@@ -704,6 +704,127 @@ def reporte_pdf(resultados, N, n, c, decision, X, sid, correcciones_count):
     W, H = A4
     now = datetime.now()
     pp = round(X / n, 4) if n > 0 else 0
+
+    # ── CONFIG defaults si no se pasó ────────────────────────────────────
+    cfg = config or {}
+
+    # ══ PÁGINA 0 — CONFIGURACIÓN DE INSPECCIÓN ════════════════════════════
+    cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0, 0, W, H, fill=1, stroke=0)
+    # Cabecera
+    cv.setFillColor(colors.HexColor("#0d1f40")); cv.rect(0, H-70, W, 70, fill=1, stroke=0)
+    cv.setFillColor(colors.HexColor("#f0b429")); cv.rect(0, H-72, W, 3, fill=1, stroke=0)
+    cv.setFillColor(colors.white); cv.setFont("Helvetica-Bold", 15)
+    cv.drawString(1.5*cm, H-32, "CONFIGURACIÓN DE INSPECCIÓN")
+    cv.setFont("Helvetica", 9); cv.setFillColor(colors.HexColor("#5a7a9a"))
+    cv.drawString(1.5*cm, H-48, "Distribuidora ANCO S.A.S.  ·  ISO 2859-1  ·  NCA 2.5%")
+    cv.drawString(1.5*cm, H-62, f"Generado: {now.strftime('%d/%m/%Y %H:%M:%S')}   Sesión: {sid}")
+
+    # Helper para dibujar filas de parámetro/valor
+    def _cfg_row(y_pos, param, valor, color_val="#f0b429", highlight=False):
+        if highlight:
+            cv.setFillColor(colors.HexColor("#1a2a10"))
+            cv.rect(1.2*cm, y_pos - 6, W - 2.4*cm, 18, fill=1, stroke=0)
+        cv.setFont("Helvetica-Bold", 8); cv.setFillColor(colors.HexColor("#5a7a9a"))
+        cv.drawString(1.8*cm, y_pos + 4, param)
+        cv.setFont("Helvetica-Bold", 9); cv.setFillColor(colors.HexColor(color_val))
+        cv.drawRightString(W - 1.8*cm, y_pos + 4, str(valor))
+        return y_pos - 22
+
+    def _cfg_section(y_pos, titulo):
+        cv.setFillColor(colors.HexColor("#1a3a6a"))
+        cv.rect(1.2*cm, y_pos - 4, W - 2.4*cm, 18, fill=1, stroke=0)
+        cv.setFillColor(colors.HexColor("#3a7bd5")); cv.rect(1.2*cm, y_pos - 4, 4, 18, fill=1, stroke=0)
+        cv.setFont("Helvetica-Bold", 9); cv.setFillColor(colors.HexColor("#7aa3cc"))
+        cv.drawString(1.8*cm, y_pos + 6, titulo.upper())
+        return y_pos - 28
+
+    y = H - 96
+
+    # ── Sección: Plan de muestreo ─────────────────────────────────────────
+    y = _cfg_section(y, "Plan de muestreo ISO 2859-1")
+    modo_plan_txt = cfg.get("modo_plan", "Automático (ISO 2859-1)")
+    y = _cfg_row(y, "Modo del plan", modo_plan_txt)
+    y = _cfg_row(y, "Tamaño del lote (N)", cfg.get("N", N))
+    y = _cfg_row(y, "Tamaño de muestra (n)", cfg.get("n", n))
+    y = _cfg_row(y, "Número de aceptación (c)", cfg.get("c", c))
+    if cfg.get("letra_iso"):
+        y = _cfg_row(y, "Letra ISO 2859-1", cfg["letra_iso"])
+    y -= 6
+
+    # ── Sección: Modelo IA ────────────────────────────────────────────────
+    y = _cfg_section(y, "Modelo de Inteligencia Artificial")
+    modelo_usado = cfg.get("modelo", "claude-sonnet-4-6")
+    modelo_label = "Claude Sonnet 4.6" if "sonnet" in modelo_usado else "Claude Haiku 4.5"
+    y = _cfg_row(y, "Modelo Claude Vision (etiquetas)", modelo_label)
+    y = _cfg_row(y, "String del modelo", modelo_usado, color_val="#7aa3cc")
+    n_votaciones = cfg.get("n_votaciones", 1)
+    y = _cfg_row(y, "Votaciones por etiqueta", f"{n_votaciones} votación(es)")
+    y = _cfg_row(y, "Rotaciones por votación", "4 (0° · 90° · 180° · 270°)")
+    total_llamadas = n_votaciones * 4
+    y = _cfg_row(y, "Llamadas Claude por etiqueta", f"{total_llamadas} llamadas",
+                 color_val="#a78bfa")
+    y = _cfg_row(y, "Modelo YOLO (cuerpos)", "YOLOv8n · mAP50=97.1%")
+    y -= 6
+
+    # ── Sección: Modo de inspección ───────────────────────────────────────
+    y = _cfg_section(y, "Modo de inspección")
+    modo_e = cfg.get("modo_estricto", False)
+    modo_txt_pdf = "ESTRICTO — Defecto MENOR cuenta como NO CONFORME" if modo_e else "NORMAL — Defecto MENOR = Observación (no cuenta en X)"
+    color_modo = "#e55353" if modo_e else "#f0b429"
+    y = _cfg_row(y, "Nivel de inspección", modo_txt_pdf, color_val=color_modo, highlight=True)
+    y -= 6
+
+    # ── Sección: Retroalimentación ────────────────────────────────────────
+    y = _cfg_section(y, "Retroalimentación YOLO ↔ Claude")
+    retro = cfg.get("retro_activo", False)
+    retro_txt_pdf = "ACTIVADA — Claude revisa y puede corregir decisiones de YOLO" if retro else "DESACTIVADA — YOLO es fuente única para cuerpos"
+    color_retro = "#a78bfa" if retro else "#5a7a9a"
+    y = _cfg_row(y, "Retroalimentación", retro_txt_pdf, color_val=color_retro)
+    if retro and correcciones_count > 0:
+        y = _cfg_row(y, "Correcciones realizadas en este lote", f"{correcciones_count}", color_val="#a78bfa")
+    y -= 6
+
+    # ── Sección: Vigencia de etiqueta ─────────────────────────────────────
+    y = _cfg_section(y, "Criterio de vigencia de etiqueta (Claude Vision)")
+    fecha_min = cfg.get("fecha_minima_str")
+    if fecha_min:
+        y = _cfg_row(y, "Fecha mínima de aceptación activa", f"SÍ — vence después de {fecha_min}",
+                     color_val="#f0b429", highlight=True)
+        try:
+            anio_min = int(fecha_min.split("/")[-1])
+            mes_min = int(fecha_min.split("/")[0])
+            y = _cfg_row(y, "Regla aplicada en prompt Claude",
+                         f"Año < {anio_min} → VENCIDA · Año ≥ {anio_min} → VIGENTE",
+                         color_val="#7aa3cc")
+        except:
+            pass
+    else:
+        y = _cfg_row(y, "Fecha mínima de aceptación", "NO ACTIVA — criterio predeterminado: año ≥ 2025 → VIGENTE",
+                     color_val="#5a7a9a")
+        y = _cfg_row(y, "Regla aplicada en prompt Claude",
+                     "Año < 2025 → VENCIDA · Año ≥ 2025 → VIGENTE", color_val="#7aa3cc")
+
+    y = _cfg_row(y, "Clasificación SIN_FECHA / ILEGIBLE", "Cuenta como NO CONFORME si confianza ≥ 75%")
+    y = _cfg_row(y, "Umbral confianza alta", "≥ 75% → clasificación directa")
+    y = _cfg_row(y, "Umbral confianza media", "50–74% → DUDOSA (cuenta en X con aviso)")
+    y = _cfg_row(y, "Umbral confianza baja", "< 50% → forzado ILEGIBLE, pasa a observación")
+    y -= 6
+
+    # ── Sección: Criterios NC ─────────────────────────────────────────────
+    y = _cfg_section(y, "Criterios de no-conformidad")
+    y = _cfg_row(y, "Cuerpo CRITICO", "NO CONFORME", color_val="#e55353")
+    y = _cfg_row(y, "Cuerpo MAYOR", "NO CONFORME", color_val="#e55353")
+    menor_nc = "NO CONFORME" if modo_e else "OBSERVACIÓN (no cuenta en X)"
+    color_menor = "#e55353" if modo_e else "#f0b429"
+    y = _cfg_row(y, "Cuerpo MENOR", menor_nc, color_val=color_menor)
+    y = _cfg_row(y, "Etiqueta VENCIDA / SIN_FECHA / ILEGIBLE", "NO CONFORME", color_val="#e55353")
+    y = _cfg_row(y, "Etiqueta VIGENTE", "CONFORME", color_val="#27c97e")
+
+    # Footer de página de configuración
+    cv.setFont("Helvetica", 7); cv.setFillColor(colors.HexColor("#1a3a5a"))
+    cv.drawCentredString(W/2, 1.2*cm, "ANCO S.A.S. · Gerencia y Control de Calidad · UNICAUCA 2026 · Página 1 de N")
+
+    cv.showPage()
 
     # P1 — Resumen
     cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0, 0, W, H, fill=1, stroke=0)
@@ -1052,9 +1173,6 @@ with st.sidebar:
     st.session_state["fecha_minima_str"] = fecha_minima_str
 
     st.markdown("---")
-    mostrar_fotos = st.checkbox("Mostrar fotos en resultados", value=True)
-
-    st.markdown("---")
     st.markdown("**Estado del sistema**")
     if YOLO_DISPONIBLE:
         ym = cargar_yolo()
@@ -1362,68 +1480,26 @@ with tab_insp:
                 f'<b style="color:#a78bfa">{correcciones}</b> de {total} latas.</div>',
                 unsafe_allow_html=True)
 
-        # ── Detalle por lata ──────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("#### Detalle por lata")
-
-        for lata in resultados:
-            nc = lata["no_conforme"]
-            clase = lata["cuerpo"].get("clase", "?")
-            estado = lata["etiqueta"].get("estado", "?")
-            conf_c = lata["cuerpo"].get("confianza", 0)
-            conf_e = lata["etiqueta"].get("confianza", 0)
-            fuente = lata["cuerpo"].get("fuente", "?")
-            corr = lata.get("corregido", False)
-            yo = lata.get("yolo_original")
-
-            # Votos de rotación
-            votos_rot = lata["etiqueta"].get("_votos", {})
-            votos_str = " | ".join(f"{k}:{v}v" for k, v in votos_rot.items()) if votos_rot else ""
-            log_rot = lata["etiqueta"].get("_rotaciones", {})
-            rot_detail = " · ".join(f"{k}:{v}" for k, v in log_rot.items()) if log_rot else ""
-
-            badge = (f'<span class="badge badge-nc">NO CONFORME</span>' if nc else
-                     f'<span class="badge badge-obs">OBSERVACIÓN</span>' if clase == "MENOR" else
-                     f'<span class="badge badge-ok">CONFORME</span>')
-            corr_tag = '<span class="corr-tag">⚡ CORREGIDO</span>' if corr else ""
-            rot_tag = f'<span class="rot-tag">🔁 {votos_str}</span>' if votos_str else ""
-            yo_txt = (f" <span style='color:#6a5a8a;font-size:11px'>[YOLO decía: {yo['clase']} {yo['confianza']:.0%}]</span>"
-                      if yo else "")
-
-            fecha_txt = f" · {lata['etiqueta'].get('fecha_leida','')}" if lata["etiqueta"].get("fecha_leida") else ""
-            detalle = (
-                f"[{fuente}] Cuerpo: <b>{clase}</b> ({conf_c:.0%}){yo_txt} – "
-                f"{lata['cuerpo'].get('descripcion','')[:45]} | "
-                f"[Claude·4rot] Etiqueta: <b>{estado}</b> ({conf_e:.0%}){fecha_txt}"
-            )
-
-            st.markdown(
-                f'<div class="lata-card">'
-                f'<div class="lata-id">#{lata["id"]}</div>'
-                f'<div class="lata-detail">{detalle}'
-                f'{"<br><small style=color:#3a5a7a>" + rot_detail + "</small>" if rot_detail else ""}'
-                f'</div>{corr_tag}{rot_tag}{badge}</div>',
-                unsafe_allow_html=True)
-
-            if mostrar_fotos and nc:
-                ci1, ci2 = st.columns(2)
-                with ci1:
-                    _img_c = Image.open(io.BytesIO(lata["img_cuerpo_bytes"])).convert("RGB")
-                    boxes = lata["cuerpo"].get("boxes", [])
-                    img_ann = dibujar_boxes(_img_c, boxes) if boxes else _img_c
-                    lbl = f"Cuerpo {lata['id']} ({fuente})"
-                    if corr: lbl += " corregido"
-                    st.image(img_ann, caption=lbl, width=220)
-                    del _img_c, img_ann
-                with ci2:
-                    _img_e = Image.open(io.BytesIO(lata["img_etiqueta_bytes"])).convert("RGB")
-                    st.image(_img_e, caption=f"Etiqueta {lata['id']} · {votos_str}", width=220)
-                    del _img_e
-
         # ── PDF ───────────────────────────────────────────────────────────
         st.markdown("---")
+
+        # Recopilar config activa para incluirla en el PDF
+        _letra_iso, _, _ = iso_plan(N_lote)
+        _config_pdf = {
+            "modo_plan": "Automático (ISO 2859-1)" if modo_plan.startswith("🤖") else "Manual",
+            "N": N_lote,
+            "n": total,
+            "c": c_lote,
+            "letra_iso": _letra_iso if modo_plan.startswith("🤖") else "N/A (modo manual)",
+            "modelo": modelo_sel,
+            "n_votaciones": intentos,
+            "modo_estricto": st.session_state.get("modo_estricto", False),
+            "retro_activo": retro_activo,
+            "fecha_minima_str": st.session_state.get("fecha_minima_str"),
+        }
+
         pdf = reporte_pdf(resultados, N_lote, total, c_lote, decision, X,
-                          st.session_state.session_id, correcciones)
+                          st.session_state.session_id, correcciones, config=_config_pdf)
         st.download_button(
             "📄 Descargar Reporte PDF", data=pdf,
             file_name=f"reporte_ANCO_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
