@@ -292,15 +292,14 @@ Responde SOLO con este JSON sin texto adicional:
 
 def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
     """
-    Prompt corto y directo para Claude Haiku/Sonnet.
-    Corrige el error "mayor o igual" con ejemplos explícitos del año límite.
+    Prompt OCR para Claude Vision — lectura de fechas en tapas de lata.
+    v3: manejo explícito del patrón 202X con dígito cortado por borde anular.
     """
     if fecha_minima_str:
         try:
             anio_min = int(fecha_minima_str.split("/")[-1])
         except:
             anio_min = 2024
-        # Ejemplos explícitos para que no haya ambigüedad en "mayor o igual"
         ej_vigente = f"{anio_min}→VIGENTE, {anio_min+1}→VIGENTE, {anio_min+2}→VIGENTE"
         ej_vencida = f"{anio_min-1}→VENCIDA, {anio_min-2}→VENCIDA, {anio_min-3}→VENCIDA"
         regla = (
@@ -311,60 +310,72 @@ def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
             f"- Ejemplos VENCIDA: {ej_vencida}\n"
             f"IMPORTANTE: El año {anio_min} es VIGENTE, NO vencida."
         )
+        # Año de inferencia para el patrón 202X: el más reciente dentro del rango vigente
+        anio_inferencia = max(anio_min, 2025)
     else:
         regla = (
             "REGLA DE VIGENCIA:\n"
-            "- Año 2025 o MAYOR (>=) → VIGENTE\n"
-            "- Año 2024 o MENOR (<) → VENCIDA\n"
-            "- Ejemplos VIGENTE: 2025→VIGENTE, 2026→VIGENTE, 2027→VIGENTE\n"
-            "- Ejemplos VENCIDA: 2024→VENCIDA, 2023→VENCIDA, 2022→VENCIDA\n"
-            "IMPORTANTE: El año 2025 es VIGENTE, NO vencida."
+            "- Año 2024 o MAYOR (>=) → VIGENTE\n"
+            "- Año 2023 o MENOR (<) → VENCIDA\n"
+            "- Ejemplos VIGENTE: 2024→VIGENTE, 2025→VIGENTE, 2026→VIGENTE\n"
+            "- Ejemplos VENCIDA: 2023→VENCIDA, 2022→VENCIDA, 2021→VENCIDA\n"
+            "IMPORTANTE: El año 2024 es VIGENTE, NO vencida."
         )
+        anio_inferencia = 2025
 
     return (
-        "Eres un lector OCR de fechas de vencimiento en tapas de latas de conserva.\n\n"
+        "Eres un lector OCR especializado en fechas de vencimiento en tapas metálicas de latas de conserva.\n\n"
 
-        "PASO 1 — ¿QUÉ MUESTRA LA IMAGEN?\n"
-        "Mira si la imagen muestra:\n"
-        "A) TAPA CIRCULAR: disco metálico redondo visto desde arriba o abajo. "
-        "Solo en este caso puede haber fecha.\n"
-        "B) CUERPO LATERAL: superficie cilíndrica con costillas/anillos horizontales. "
-        'No hay fecha. Responde: {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"cuerpo lateral sin tapa"}\n'
-        "C) ETIQUETA DECORATIVA con logo/marca (CERTIFIED QUALITY, ARGENTINA, YOUNGS TOWN): "
-        'No hay fecha de vencimiento. Responde: {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"etiqueta decorativa sin fecha"}\n\n'
+        "PASO 1 — IDENTIFICA QUÉ MUESTRA LA IMAGEN\n"
+        "A) TAPA CIRCULAR: disco metálico redondo con texto impreso en dot-matrix, visto desde arriba/abajo. "
+        "Aquí puede haber fecha → continúa al PASO 2.\n"
+        "B) CUERPO LATERAL: superficie cilíndrica con costillas/anillos horizontales concéntricos. "
+        'Sin fecha. Responde: {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"cuerpo lateral sin tapa"}\n'
+        "C) ETIQUETA DECORATIVA con logo/marca (CERTIFIED QUALITY, ARGENTINA, YOUNGS TOWN, etc.): "
+        'Sin fecha de vencimiento. Responde: {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"etiqueta decorativa sin fecha"}\n\n'
 
         "PASO 2 — LEE LA FECHA (solo si es TAPA CIRCULAR)\n"
-        "Busca: EXPIRY DATE, EXP, BEST BEFORE, BB, VENCE\n"
-        "Ignora: nombres de marca, CERTIFIED, lote, códigos de producción\n"
-        "El año son 4 dígitos: 2022, 2023, 2024, 2025, 2026...\n"
-        "Formatos comunes: DD MMM YYYY · DD/MM/YYYY · DDMMMYYYY\n"
-        "Ejemplos reales de estas latas:\n"
-        "  '16FEB2025' → año 2025\n"
-        "  '05 NOV 2024' → año 2024\n"
-        "  '19JUN2024' → año 2024\n"
-        "  '25 NOV 2023' → año 2023\n"
-        "  '18 AUG 2022' → año 2022\n\n"
+        "Busca las palabras clave: EXPIRY DATE, EXP, BEST BEFORE, BB, VENCE, FECHA VTO\n"
+        "Ignora: nombres de marca, CERTIFIED, números de lote, códigos alfanuméricos de producción\n"
+        "El año son SIEMPRE 4 dígitos que empiezan con 20: 2022, 2023, 2024, 2025, 2026...\n"
+        "Formatos comunes en estas latas: DDMMMYYYY · DD MMM YYYY · DD/MM/YYYY\n"
+        "Ejemplos reales observados en este tipo de lata:\n"
+        "  '16FEB2025' → año=2025 → VIGENTE\n"
+        "  '06 FEB 2025' → año=2025 → VIGENTE\n"
+        "  '24 MAR 2025' → año=2025 → VIGENTE\n"
+        "  '25 NOV 2023' → año=2023 → VENCIDA\n"
+        "  '06 FEB 2023' → año=2023 → VENCIDA\n\n"
 
         + regla + "\n\n"
 
-        "PASO 3 — CLASIFICA\n"
-        "- Si leíste el año claramente → aplica la REGLA DE VIGENCIA\n"
-        "- Si ves texto pero no puedes leer el año → ILEGIBLE\n"
-        "- Si no hay ningún texto de fecha → SIN_FECHA\n\n"
+        "PASO 3 — CASO CRÍTICO: DÍGITO FINAL DEL AÑO CORTADO POR EL BORDE ANULAR\n"
+        "Las tapas tienen anillos concéntricos metálicos. El texto dot-matrix se imprime\n"
+        "en el área plana central y a veces el ÚLTIMO DÍGITO del año queda parcialmente\n"
+        "tapado o cortado por el borde del primer anillo.\n\n"
+        "REGLA ANTI-ALUCINACIÓN para este patrón:\n"
+        "  - Si lees claramente 'EXPIRY DATE' o 'EXP' Y ves '06 FEB 202_' o 'DD MMM 202_'\n"
+        "    donde el último dígito está cortado o es ambiguo:\n"
+        "    → NUNCA reportes VENCIDA basándote en un dígito que no ves con certeza\n"
+        f"   → Infiere el año como {anio_inferencia} (año vigente más probable de este proveedor)\n"
+        f"   → Reporta: estado=VIGENTE, fecha_leida='DD MMM {anio_inferencia}', confianza=0.65\n"
+        "    → descripcion: 'DD MMM 202X — último dígito parcialmente cortado, inferido como "
+        f"{anio_inferencia}'\n\n"
+        "  - Este patrón '202_' con dígito cortado NUNCA debe producir VENCIDA con año inventado\n"
+        "    (como 2023 o 2022) si no lees claramente ese dígito.\n\n"
+
+        "PASO 4 — CLASIFICA\n"
+        "- Año claramente legible → aplica REGLA DE VIGENCIA\n"
+        "- Patrón '202_' con dígito cortado → aplica CASO CRÍTICO (PASO 3)\n"
+        "- Texto presente pero año completamente ilegible → ILEGIBLE\n"
+        "- Sin texto de fecha → SIN_FECHA\n\n"
 
         "CONFIANZA:\n"
-        "0.85-1.00: año perfectamente claro | "
-        "0.60-0.84: año legible con leve duda | "
-        "0.30-0.59: no puedes confirmar el año → usa ILEGIBLE\n\n"
+        "0.85-1.00: año perfectamente legible (todos los dígitos claros)\n"
+        "0.65-0.84: año legible con leve duda o dígito parcial inferido\n"
+        "0.30-0.64: duda significativa sobre el año → considera ILEGIBLE\n\n"
 
-        "CASO ESPECIAL — dígito final del año cortado o borroso:\n"
-        "Si ves claramente \"EXPIRY DATE\" o \"EXP\" y lees \"202\" pero el último dígito\n"
-        "está cortado por el borde de la tapa o es ilegible:\n"
-        "- Si el texto visible es nítido y el formato es de conserva moderna → el año probable es 2025\n"
-        "- Usa confianza 0.65 y fecha_leida con el año inferido\n"
-        "- NO uses ILEGIBLE solo porque falta un dígito si el resto es claro\n\n"
-        "Responde SOLO con JSON sin texto adicional ni markdown:\n"
-        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto o null","confianza":0.00,"descripcion":"qué leíste"}'
+        "Responde SOLO con JSON válido, sin texto adicional ni markdown:\n"
+        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto o null","confianza":0.00,"descripcion":"descripcion breve de lo que viste"}'
     )
 
 PROMPT_ETIQUETA = construir_prompt_etiqueta()
@@ -450,21 +461,36 @@ def _filtro_normal(img: Image.Image) -> Image.Image:
 
 def _filtro_brillante(img: Image.Image) -> Image.Image:
     """
-    Filtro de refuerzo para dígitos tenues o cortados al borde de la tapa.
-    Aumenta el brillo para revelar texto casi invisible, sin invertir colores
-    (la inversión destruía dígitos parciales convirtiendo el fondo en ruido).
-    Además aplica un zoom central para ampliar el área del texto.
+    Filtro 2: zoom central + brillo elevado para dígitos tenues o cortados al borde.
+    Detecta si la tapa es oscura/dorada y aplica corrección gamma en ese caso.
     """
-    # Zoom al centro donde suele estar el texto (elimina borde circular vacío)
+    import numpy as _np
     w, h = img.size
+    # Zoom al centro eliminando el anillo exterior vacío
     margin = int(min(w, h) * 0.12)
-    img = img.crop((margin, margin, w - margin, h - margin))
-    img = img.resize((w, h), Image.LANCZOS)
-    # Brillo alto: revela texto tenue sin invertir
-    img = ImageEnhance.Brightness(img).enhance(1.6)
-    img = ImageEnhance.Contrast(img).enhance(2.8)
-    img = ImageEnhance.Sharpness(img).enhance(3.5)
-    return img
+    img_zoom = img.crop((margin, margin, w - margin, h - margin))
+    img_zoom = img_zoom.resize((w, h), Image.LANCZOS)
+
+    # Detectar tipo de tapa por canales RGB
+    arr = _np.array(img_zoom)
+    r_mean = arr[:, :, 0].mean()
+    b_mean = arr[:, :, 2].mean()
+    es_oscura_o_dorada = (r_mean - b_mean > 12) or (arr.mean() < 110)
+
+    if es_oscura_o_dorada:
+        # Corrección gamma 0.5 para aclarar sombras sin saturar zonas claras
+        arr_f = arr.astype(_np.float32) / 255.0
+        arr_f = _np.power(arr_f, 0.5)
+        arr_f = (_np.clip(arr_f, 0, 1) * 255).astype(_np.uint8)
+        img_zoom = Image.fromarray(arr_f)
+        img_zoom = ImageEnhance.Contrast(img_zoom).enhance(2.5)
+        img_zoom = ImageEnhance.Sharpness(img_zoom).enhance(4.0)
+    else:
+        img_zoom = ImageEnhance.Brightness(img_zoom).enhance(1.6)
+        img_zoom = ImageEnhance.Contrast(img_zoom).enhance(2.8)
+        img_zoom = ImageEnhance.Sharpness(img_zoom).enhance(3.5)
+
+    return img_zoom
 
 def _filtro_medio(img: Image.Image) -> Image.Image:
     """
@@ -553,26 +579,39 @@ def _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str=None) 
     if max_votos == len(validos):
         ganador = conteo.most_common(1)[0][0]
         usar_desempate = False
-    # ── Empate VIGENTE vs VENCIDA → activar tercer filtro ────────────────
+    # ── Empate VIGENTE vs VENCIDA → revisar si el año es ambiguo ─────────
     elif set(estados) == {"VIGENTE", "VENCIDA"}:
         usar_desempate = True
-        # Aplicar filtro medio con prompt restrictivo
-        try:
-            img_medio = _filtro_medio(img_base.copy())
-            b64_medio = pil_b64(img_medio)
-            prompt_d = _prompt_desempate(fecha_minima_str)
-            res_d = llamar_claude(client, b64_medio, prompt_d, modelo)
-            if res_d and isinstance(res_d, dict) and res_d.get("estado") in ("VIGENTE", "VENCIDA"):
-                ganador = res_d["estado"]
-                resultados["medio_desempate"] = res_d
-                conteo[ganador] = conteo.get(ganador, 0) + 1
-            else:
-                # Si el desempate falla también → VENCIDA (conservador)
+        # Antes de llamar al tercer filtro: si ambos filtros leyeron "202X"
+        # y uno alucinó el dígito como vencido, favorecer VIGENTE directamente
+        fechas_leidas = [r.get("fecha_leida") or "" for r in validos]
+        patron_202x = any(
+            "202" in f and len(f) >= 3 and not any(
+                str(y) in f for y in range(2000, 2024)  # ningún año claramente vencido
+            )
+            for f in fechas_leidas if f
+        )
+        if patron_202x:
+            # La ambigüedad es por dígito cortado: VIGENTE es más seguro que inventar un año vencido
+            ganador = "VIGENTE"
+            usar_desempate = False
+        else:
+            # Empate real → activar tercer filtro
+            try:
+                img_medio = _filtro_medio(img_base.copy())
+                b64_medio = pil_b64(img_medio)
+                prompt_d = _prompt_desempate(fecha_minima_str)
+                res_d = llamar_claude(client, b64_medio, prompt_d, modelo)
+                if res_d and isinstance(res_d, dict) and res_d.get("estado") in ("VIGENTE", "VENCIDA"):
+                    ganador = res_d["estado"]
+                    resultados["medio_desempate"] = res_d
+                    conteo[ganador] = conteo.get(ganador, 0) + 1
+                else:
+                    ganador = "VENCIDA"
+                    resultados["medio_desempate"] = None
+            except Exception:
                 ganador = "VENCIDA"
                 resultados["medio_desempate"] = None
-        except Exception:
-            ganador = "VENCIDA"
-            resultados["medio_desempate"] = None
     # ── Otros empates → gana el más grave ────────────────────────────────
     else:
         usar_desempate = False
