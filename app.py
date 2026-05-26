@@ -292,58 +292,73 @@ Responde SOLO con este JSON sin texto adicional:
 
 def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
     """
-    Prompt ultra-corto optimizado para Claude Haiku.
-    Haiku rinde mejor con instrucciones directas y ejemplos concretos
-    en lugar de razonamiento multi-paso.
+    Prompt corto y directo para Claude Haiku/Sonnet.
+    Corrige el error "mayor o igual" con ejemplos explícitos del año límite.
     """
     if fecha_minima_str:
         try:
             anio_min = int(fecha_minima_str.split("/")[-1])
         except:
             anio_min = 2024
+        # Ejemplos explícitos para que no haya ambigüedad en "mayor o igual"
+        ej_vigente = f"{anio_min}→VIGENTE, {anio_min+1}→VIGENTE, {anio_min+2}→VIGENTE"
+        ej_vencida = f"{anio_min-1}→VENCIDA, {anio_min-2}→VENCIDA, {anio_min-3}→VENCIDA"
         regla = (
-            f"Si el año es {anio_min} o mayor → VIGENTE. "
-            f"Si el año es menor que {anio_min} → VENCIDA. "
-            f"Ejemplos: 2025→{'VIGENTE' if anio_min<=2025 else 'VENCIDA'}, "
-            f"2024→{'VIGENTE' if anio_min<=2024 else 'VENCIDA'}, "
-            f"2023→VENCIDA, 2022→VENCIDA."
+            f"REGLA DE VIGENCIA:\n"
+            f"- Año {anio_min} o MAYOR (>=) → VIGENTE\n"
+            f"- Año {anio_min-1} o MENOR (<) → VENCIDA\n"
+            f"- Ejemplos VIGENTE: {ej_vigente}\n"
+            f"- Ejemplos VENCIDA: {ej_vencida}\n"
+            f"IMPORTANTE: El año {anio_min} es VIGENTE, NO vencida."
         )
     else:
         regla = (
-            "Si el año es 2025 o mayor → VIGENTE. "
-            "Si el año es 2024 o menor → VENCIDA. "
-            "Ejemplos: 2026→VIGENTE, 2025→VIGENTE, 2024→VENCIDA, 2023→VENCIDA."
+            "REGLA DE VIGENCIA:\n"
+            "- Año 2025 o MAYOR (>=) → VIGENTE\n"
+            "- Año 2024 o MENOR (<) → VENCIDA\n"
+            "- Ejemplos VIGENTE: 2025→VIGENTE, 2026→VIGENTE, 2027→VIGENTE\n"
+            "- Ejemplos VENCIDA: 2024→VENCIDA, 2023→VENCIDA, 2022→VENCIDA\n"
+            "IMPORTANTE: El año 2025 es VIGENTE, NO vencida."
         )
 
     return (
-        "Lee la fecha de vencimiento en esta imagen de una tapa de lata de conserva.\n\n"
+        "Eres un lector OCR de fechas de vencimiento en tapas de latas de conserva.\n\n"
 
-        "TIPOS DE IMAGEN:\n"
-        "- TAPA CIRCULAR (disco metálico visto desde arriba): busca la fecha aquí.\n"
-        "- CUERPO LATERAL (cilindro con costillas horizontales): NO hay fecha. Responde SIN_FECHA.\n"
-        "- ETIQUETA DECORATIVA (logo, texto de marca, CERTIFIED QUALITY, ARGENTINA): NO hay fecha de vencimiento. Responde SIN_FECHA.\n\n"
+        "PASO 1 — ¿QUÉ MUESTRA LA IMAGEN?\n"
+        "Mira si la imagen muestra:\n"
+        "A) TAPA CIRCULAR: disco metálico redondo visto desde arriba o abajo. "
+        "Solo en este caso puede haber fecha.\n"
+        "B) CUERPO LATERAL: superficie cilíndrica con costillas/anillos horizontales. "
+        'No hay fecha. Responde: {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"cuerpo lateral sin tapa"}\n'
+        "C) ETIQUETA DECORATIVA con logo/marca (CERTIFIED QUALITY, ARGENTINA, YOUNGS TOWN): "
+        'No hay fecha de vencimiento. Responde: {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"etiqueta decorativa sin fecha"}\n\n'
 
-        "CÓMO LEER LA FECHA:\n"
-        "- El texto puede estar rotado. Léelo en cualquier orientación.\n"
-        "- Busca: EXPIRY DATE, EXP, BEST BEFORE, BB, VENCE, CAD\n"
-        "- Ignora: nombres de marca, CERTIFIED, QUALITY, ARGENTINA, YOUNGS TOWN, códigos de lote\n"
-        "- El año son 4 dígitos: 2022, 2023, 2024, 2025, 2026...\n\n"
-
-        "FORMATOS COMUNES EN ESTAS LATAS:\n"
-        "- DD MMM YYYY (ej: 16 FEB 2025, 24 MAR 2025, 25 NOV 2023)\n"
-        "- EXPIRY DATE / DD MMM YYYY en dos líneas\n"
-        "- CHFOC E NNNNN / EXPIRY DATE / DD MMM YYYY en tres líneas\n\n"
+        "PASO 2 — LEE LA FECHA (solo si es TAPA CIRCULAR)\n"
+        "Busca: EXPIRY DATE, EXP, BEST BEFORE, BB, VENCE\n"
+        "Ignora: nombres de marca, CERTIFIED, lote, códigos de producción\n"
+        "El año son 4 dígitos: 2022, 2023, 2024, 2025, 2026...\n"
+        "Formatos comunes: DD MMM YYYY · DD/MM/YYYY · DDMMMYYYY\n"
+        "Ejemplos reales de estas latas:\n"
+        "  '16FEB2025' → año 2025\n"
+        "  '05 NOV 2024' → año 2024\n"
+        "  '19JUN2024' → año 2024\n"
+        "  '25 NOV 2023' → año 2023\n"
+        "  '18 AUG 2022' → año 2022\n\n"
 
         + regla + "\n\n"
 
-        "CONFIANZA:\n"
-        "- 0.90: año perfectamente claro\n"
-        "- 0.75: año legible con leve duda\n"
-        "- 0.50: texto visible pero año incierto\n"
-        "- 0.30: no puedes leer el año → usa ILEGIBLE\n\n"
+        "PASO 3 — CLASIFICA\n"
+        "- Si leíste el año claramente → aplica la REGLA DE VIGENCIA\n"
+        "- Si ves texto pero no puedes leer el año → ILEGIBLE\n"
+        "- Si no hay ningún texto de fecha → SIN_FECHA\n\n"
 
-        "Responde SOLO con este JSON (sin texto adicional, sin markdown):\n"
-        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto leído o null","confianza":0.00,"descripcion":"qué viste"}'
+        "CONFIANZA:\n"
+        "0.85-1.00: año perfectamente claro | "
+        "0.60-0.84: año legible con leve duda | "
+        "0.30-0.59: no puedes confirmar el año → usa ILEGIBLE\n\n"
+
+        "Responde SOLO con JSON sin texto adicional ni markdown:\n"
+        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto o null","confianza":0.00,"descripcion":"qué leíste"}'
     )
 
 PROMPT_ETIQUETA = construir_prompt_etiqueta()
