@@ -1,7 +1,7 @@
 """
 Sistema de Inspección de Lotes – Distribuidora ANCO S.A.S.
 ISO 2859-1 · YOLOv8n + Claude Vision (retroalimentación opcional)
-FIX: 4 rotaciones por votación + prompt OCR reforzado anti-alucinación
+FIX: 2 filtros por votación (normal + invertido) + prompt OCR reforzado anti-alucinación
 """
 
 import streamlit as st
@@ -386,12 +386,6 @@ def preproc_etiqueta(img, mn=1000):
     img = ImageEnhance.Brightness(img).enhance(1.15)
     return img
 
-def rotar_imagen(img: Image.Image, angulo: int) -> Image.Image:
-    """Rota la imagen por ángulo (0, 90, 180, 270) con expand=True."""
-    if angulo == 0:
-        return img
-    return img.rotate(angulo, expand=True)
-
 def parse_json(txt):
     txt = re.sub(r"```[a-z]*", "", txt).strip().strip("`").strip()
     try:
@@ -420,182 +414,152 @@ def llamar_claude(client, b64, prompt, modelo):
     )
     return parse_json(r.content[0].text)
 
-def _llamar_rotacion(args):
-    """
-    Worker para ThreadPoolExecutor.
-    Recibe (client, img_proc, angulo, prompt, modelo) y retorna (angulo, resultado).
-    """
-    client, img_proc, angulo, prompt, modelo = args
-    try:
-        img_rot = rotar_imagen(img_proc, angulo)
-        b64 = pil_b64(img_rot)
-        res = llamar_claude(client, b64, prompt, modelo)
-        if res:
-            res["_angulo"] = angulo
-        return angulo, res
-    except Exception as e:
-        return angulo, None
-
 # ══════════════════════════════════════════════════════════════════════════════
-# CONSENSO ETIQUETA — 4 ROTACIONES POR VOTACIÓN
+# CONSENSO ETIQUETA — 2 FILTROS POR VOTACIÓN
 # ══════════════════════════════════════════════════════════════════════════════
 # Prioridad de estados para desempate (mayor = más grave)
 _PRIO_ESTADO = {"VENCIDA": 4, "ILEGIBLE": 3, "SIN_FECHA": 2, "VIGENTE": 1, "ERROR": 0}
 
-def _consenso_4rotaciones(client, img_proc, prompt, modelo) -> dict:
-    """
-    Envía la imagen en 4 rotaciones (0°, 90°, 180°, 270°) en paralelo.
-    Reglas de consenso:
-      1. Mayoría simple por estado (≥3 de 4 o ≥2 de 4)
-      2. Empate entre VIGENTE y VENCIDA → gana VENCIDA (más grave)
-      3. SIN_FECHA con ≥2 votos → SIN_FECHA (la imagen no tiene tapa)
-      4. Confianza = promedio de las que ganaron
-      5. fecha_leida = primera no-nula de las ganadoras
-    """
-    angulos = [0, 90, 180, 270]
+def _filtro_normal(img: Image.Image) -> Image.Image:
+    """Preprocesamiento estándar: contraste + nitidez elevados."""
+    img = ImageEnhance.Contrast(img).enhance(2.2)
+    img = ImageEnhance.Sharpness(img).enhance(3.0)
+    img = ImageEnhance.Brightness(img).enhance(1.15)
+    return img
 
-    # Llamadas secuenciales — Streamlit Cloud no garantiza threading seguro
-    resultados_por_angulo = {}
-    for ang in angulos:
+def _filtro_invertido(img: Image.Image) -> Image.Image:
+    """
+    Preprocesamiento con inversión de colores.
+    El texto grabado en relieve sobre metal claro (oscuro sobre claro)
+    se convierte en claro sobre oscuro — algunos modelos lo leen mejor así.
+    """
+    from PIL import ImageOps
+    img = ImageEnhance.Contrast(img).enhance(2.5)
+    img = ImageEnhance.Sharpness(img).enhance(3.0)
+    img = ImageOps.invert(img.convert("RGB"))
+    return img
+
+def _consenso_2filtros(client, img_base, prompt, modelo) -> dict:
+    """
+    Analiza la misma imagen con 2 filtros distintos y hace consenso.
+    Filtro 1: preprocesamiento normal (contraste/nitidez)
+    Filtro 2: misma imagen con colores invertidos
+    Empate → gana el más grave.
+    """
+    variantes = [
+        ("normal",    _filtro_normal(img_base.copy())),
+        ("invertido", _filtro_invertido(img_base.copy())),
+    ]
+
+    resultados = {}
+    for nombre, img_v in variantes:
         try:
-            img_rot = rotar_imagen(img_proc, ang)
-            b64 = pil_b64(img_rot)
+            b64 = pil_b64(img_v)
             res = llamar_claude(client, b64, prompt, modelo)
-            if res:
-                res["_angulo"] = ang
-            resultados_por_angulo[ang] = res
+            resultados[nombre] = res if (res and isinstance(res, dict) and "estado" in res) else None
         except Exception:
-            resultados_por_angulo[ang] = None
+            resultados[nombre] = None
 
-    # Recolectar respuestas válidas
-    validos = []
-    for ang in angulos:
-        r = resultados_por_angulo.get(ang)
-        if r and isinstance(r, dict) and "estado" in r:
-            validos.append(r)
+    # Recolectar válidos
+    validos = [r for r in resultados.values() if r]
 
     if not validos:
         return {
             "estado": "ILEGIBLE",
             "fecha_leida": None,
             "confianza": 0.10,
-            "descripcion": "Sin respuesta en ninguna rotación",
-            "fuente": "Claude(4rot)",
-            "_rotaciones": {}
+            "descripcion": "Sin respuesta en ningún filtro",
+            "fuente": "Claude(2fil)",
+            "_filtros": {k: "ERROR" for k in resultados},
+            "_votos": {}
         }
 
-    # Conteo de votos por estado
     conteo = Counter(r["estado"] for r in validos)
+    max_votos = conteo.most_common(1)[0][1]
     n_validos = len(validos)
 
-    # Mayoría: ≥3 de 4 o ≥2 de 3 válidos
-    ganador = None
-    max_votos = conteo.most_common(1)[0][1]
-
-    if max_votos >= 3:
-        # Mayoría clara
+    if max_votos == n_validos:
+        # Unanimidad
         ganador = conteo.most_common(1)[0][0]
-    elif max_votos == 2 and n_validos == 4:
-        # Empate 2-2 entre dos estados → reglas de desempate
-        top2 = [s for s, _ in conteo.most_common(2)]
-
-        # SIN_FECHA + cualquier cosa → SIN_FECHA (imagen no tiene tapa)
-        if "SIN_FECHA" in top2:
-            ganador = "SIN_FECHA"
-        # VENCIDA vs cualquier cosa → VENCIDA (más grave, conservador)
-        elif "VENCIDA" in top2:
-            ganador = "VENCIDA"
-        # ILEGIBLE vs VIGENTE → ILEGIBLE (no confirmar sin claridad)
-        elif "ILEGIBLE" in top2:
-            ganador = "ILEGIBLE"
-        else:
-            ganador = top2[0]
-    elif max_votos == 2 and n_validos == 3:
-        # Mayoría 2 de 3
+    elif max_votos > 1:
+        # Mayoría
         ganador = conteo.most_common(1)[0][0]
     else:
-        # Todos distintos (1-1-1-1): aplicar prioridad de gravedad
-        # Si hay VENCIDA → VENCIDA; si hay ILEGIBLE → ILEGIBLE; etc.
+        # Empate 1-1 → gana el más grave
         ganador = max(conteo.keys(), key=lambda s: _PRIO_ESTADO.get(s, 0))
 
-    # Calcular confianza promedio de los que votaron como ganador
     ganadoras = [r for r in validos if r["estado"] == ganador]
     confianza_prom = round(sum(r.get("confianza", 0.5) for r in ganadoras) / len(ganadoras), 3)
-
-    # fecha_leida: primera no-nula de las ganadoras
     fecha = next((r.get("fecha_leida") for r in ganadoras if r.get("fecha_leida")), None)
+    desc = next((r.get("descripcion", "") for r in ganadoras if r.get("descripcion")), "")
 
-    # descripción compuesta
-    desc_partes = [r.get("descripcion", "") for r in ganadoras if r.get("descripcion")]
-    desc = desc_partes[0] if desc_partes else ""
-
-    # Log de rotaciones para debugging
-    log_rot = {}
-    for ang in angulos:
-        r_ang = resultados_por_angulo.get(ang)
-        if r_ang and isinstance(r_ang, dict):
-            log_rot[ang] = r_ang.get("estado", "ERROR")
-        else:
-            log_rot[ang] = "ERROR" 
+    log_filtros = {
+        k: (v.get("estado", "ERROR") if v else "ERROR")
+        for k, v in resultados.items()
+    }
 
     return {
         "estado": ganador,
         "fecha_leida": fecha,
         "confianza": confianza_prom,
         "descripcion": desc,
-        "fuente": "Claude(4rot)",
-        "_rotaciones": log_rot,
+        "fuente": "Claude(2fil)",
+        "_filtros": log_filtros,
         "_votos": dict(conteo)
     }
 
 
 def consenso_claude_etiqueta(client, img: Image.Image, prompt: str, modelo: str, n_votaciones: int = 1) -> dict:
     """
-    n_votaciones votaciones independientes, cada una con 4 rotaciones.
-    Resultado final: consenso entre votaciones usando las mismas reglas.
+    n_votaciones rondas independientes, cada una con 2 filtros (normal + invertido).
+    Total llamadas = n_votaciones × 2.
     """
-    img_proc = preproc_etiqueta(img)
+    # Escalar la imagen base una sola vez
+    w, h = img.size
+    mn = 1000
+    if min(w, h) < mn:
+        f = mn / min(w, h)
+        img_base = img.resize((int(w*f), int(h*f)), Image.LANCZOS)
+    else:
+        img_base = img.copy()
 
     if n_votaciones == 1:
-        res = _consenso_4rotaciones(client, img_proc, prompt, modelo)
-        res["fuente"] = "Claude(4rot×1)"
+        res = _consenso_2filtros(client, img_base, prompt, modelo)
+        res["fuente"] = "Claude(2fil×1)"
         return res
 
-    # Múltiples votaciones
-    votaciones = []
+    # Múltiples rondas
+    rondas = []
     for _ in range(n_votaciones):
-        r = _consenso_4rotaciones(client, img_proc, prompt, modelo)
-        votaciones.append(r)
+        r = _consenso_2filtros(client, img_base, prompt, modelo)
+        rondas.append(r)
 
-    # Consenso entre votaciones (mismas reglas)
-    conteo = Counter(v["estado"] for v in votaciones)
+    conteo = Counter(v["estado"] for v in rondas)
     max_votos = conteo.most_common(1)[0][1]
-    n_v = len(votaciones)
+    n_v = len(rondas)
 
     if max_votos > n_v / 2:
         ganador = conteo.most_common(1)[0][0]
     else:
-        # Empate: aplicar prioridad de gravedad
         ganador = max(conteo.keys(), key=lambda s: _PRIO_ESTADO.get(s, 0))
 
-    ganadoras = [v for v in votaciones if v["estado"] == ganador]
+    ganadoras = [v for v in rondas if v["estado"] == ganador]
     confianza_prom = round(sum(v.get("confianza", 0.5) for v in ganadoras) / len(ganadoras), 3)
     fecha = next((v.get("fecha_leida") for v in ganadoras if v.get("fecha_leida")), None)
     desc = next((v.get("descripcion", "") for v in ganadoras if v.get("descripcion")), "")
 
-    # Consolidar logs de rotaciones
-    log_rot_consolidado = {}
-    for i, v in enumerate(votaciones):
-        for ang, estado in v.get("_rotaciones", {}).items():
-            log_rot_consolidado[f"v{i+1}_{ang}°"] = estado
+    log_consolidado = {}
+    for i, v in enumerate(rondas):
+        for fil, estado in v.get("_filtros", {}).items():
+            log_consolidado[f"r{i+1}_{fil}"] = estado
 
     return {
         "estado": ganador,
         "fecha_leida": fecha,
         "confianza": confianza_prom,
         "descripcion": desc,
-        "fuente": f"Claude(4rot×{n_votaciones})",
-        "_rotaciones": log_rot_consolidado,
+        "fuente": f"Claude(2fil×{n_votaciones})",
+        "_filtros": log_consolidado,
         "_votos": dict(conteo)
     }
 
@@ -753,8 +717,8 @@ def reporte_pdf(resultados, N, n, c, decision, X, sid, correcciones_count, confi
     y = _cfg_row(y, "String del modelo", modelo_usado, color_val="#7aa3cc")
     n_votaciones = cfg.get("n_votaciones", 1)
     y = _cfg_row(y, "Votaciones por etiqueta", f"{n_votaciones} votación(es)")
-    y = _cfg_row(y, "Rotaciones por votación", "4 (0° · 90° · 180° · 270°)")
-    total_llamadas = n_votaciones * 4
+    y = _cfg_row(y, "Análisis por votación", "2 (filtro normal + filtro invertido)")
+    total_llamadas = n_votaciones * 2
     y = _cfg_row(y, "Llamadas Claude por etiqueta", f"{total_llamadas} llamadas",
                  color_val="#a78bfa")
     y = _cfg_row(y, "Modelo YOLO (cuerpos)", "YOLOv8n · mAP50=97.1%")
@@ -1083,7 +1047,7 @@ with st.sidebar:
         format_func=lambda m: "Sonnet 4.6 (recomendado)" if "sonnet" in m else "Haiku 4.5 (rápido)")
 
     intentos = st.select_slider(
-        "Votaciones etiqueta (cada una = 4 rotaciones)",
+        "Votaciones etiqueta (cada una = 2 análisis)",
         options=[1, 2, 3], value=1,
         help="1 votación = 4 llamadas Claude (0°/90°/180°/270°). "
              "2 votaciones = 8 llamadas. 3 votaciones = 12 llamadas. "
@@ -1091,13 +1055,13 @@ with st.sidebar:
     )
 
     # Indicador de costo estimado
-    n_llamadas_est = intentos * 4
+    n_llamadas_est = intentos * 2
     st.markdown(
         f'<div class="rot-box">'
-        f'<span style="color:#3a7bd5">● 4 ROTACIONES POR VOTACIÓN</span><br>'
-        f'<span style="color:#5a7a9a">{intentos} votación(es) × 4 rot = '
+        f'<span style="color:#3a7bd5">● 2 FILTROS POR VOTACIÓN</span><br>'
+        f'<span style="color:#5a7a9a">{intentos} votación(es) × 2 filtros = '
         f'<b style="color:#f0b429">{n_llamadas_est} llamadas</b> por etiqueta<br>'
-        f'Desempate: VENCIDA > ILEGIBLE > SIN_FECHA > VIGENTE</span>'
+        f'Normal + Invertido · Empate → más grave</span>'
         f'</div>', unsafe_allow_html=True
     )
 
@@ -1201,11 +1165,10 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 retro_txt = " · 🔄 Retroalimentación activa" if retro_activo else ""
 modo_txt = " · 🔴 Modo Estricto" if st.session_state.get("modo_estricto", False) else ""
-rot_txt = f" · 🔁 {intentos}×4rot"
 st.markdown(
     f'<div class="hero"><div class="hero-title">🥫 SISTEMA DE INSPECCIÓN DE LOTES – ANCO S.A.S.</div>'
     f'<p class="hero-sub">ISO 2859-1 · NCA 2.5% · YOLOv8n (cuerpo) + Claude Vision (etiqueta)'
-    f'{rot_txt}{retro_txt}{modo_txt} · Gerencia y Control de Calidad</p></div>',
+    f'{retro_txt}{modo_txt} · Gerencia y Control de Calidad</p></div>',
     unsafe_allow_html=True)
 
 api_key = get_key()
@@ -1279,7 +1242,7 @@ with tab_plan:
         st.markdown(f"| Clase | NC |\n|---|---|\n| CRÍTICO | ✅ Sí |\n| MAYOR | ✅ Sí |\n| MENOR | {_menor_txt} |\n| CONFORME | ❌ No |")
     with col_r2:
         _fm_activa = st.session_state.get("fecha_minima_str")
-        st.markdown("**Defectos de etiqueta (Claude Vision · 4 rotaciones)**")
+        st.markdown("**Defectos de etiqueta (Claude Vision · 2 filtros)**")
         if _fm_activa:
             st.markdown(
                 f'<div style="background:#0d1a2a;border:1px solid #1a3a5a;border-left:3px solid #f0b429;'
@@ -1311,11 +1274,11 @@ with tab_insp:
     with c3: st.metric("c – Número de aceptación", c_lote)
 
     # Info de costo estimado
-    llamadas_est = n_lote * intentos * 4
+    llamadas_est = n_lote * intentos * 2
     st.markdown(
         f'<div class="rot-box" style="margin-bottom:10px">'
-        f'🔁 Cada etiqueta = <b style="color:#f0b429">{intentos} votación(es) × 4 rotaciones</b> = '
-        f'{intentos*4} llamadas · Total estimado: <b style="color:#f0b429">{llamadas_est} llamadas Claude</b> '
+        f'🔬 Cada etiqueta = <b style="color:#f0b429">{intentos} votación(es) × 2 filtros</b> = '
+        f'{intentos*2} llamadas · Total estimado: <b style="color:#f0b429">{llamadas_est} llamadas Claude</b> '
         f'para {n_lote} latas</div>', unsafe_allow_html=True)
 
     st.markdown("---")
@@ -1399,8 +1362,7 @@ with tab_insp:
                 res_c = consenso_claude_cuerpo(client, img_c, PROMPT_CUERPO_SOLO, modelo_sel, intentos)
 
             # ── Etiqueta: 4 rotaciones × n_votaciones ───────────────────
-            n_rot_txt = f"{intentos}×4rot"
-            status.markdown(f"`[{lid}]` 🏷️ Claude analizando etiqueta ({n_rot_txt})...")
+            status.markdown(f"`[{lid}]` 🏷️ Claude analizando etiqueta ({intentos}×2 filtros)...")
 
             _fm = st.session_state.get("fecha_minima_str")
             _prompt_e = construir_prompt_etiqueta(_fm) if _fm else PROMPT_ETIQUETA
@@ -1574,5 +1536,5 @@ with tab_hist:
 
 st.markdown(
     '<div class="footer">ANCO S.A.S. · ISO 2859-1 · NCA 2.5% · '
-    'YOLOv8n + Claude Vision 4rot · Gerencia y Control de Calidad · UNICAUCA 2026</div>',
+    'YOLOv8n + Claude Vision 2fil · Gerencia y Control de Calidad · UNICAUCA 2026</div>',
     unsafe_allow_html=True)
