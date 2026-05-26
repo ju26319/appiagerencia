@@ -454,12 +454,57 @@ def _filtro_invertido(img: Image.Image) -> Image.Image:
     img = ImageOps.invert(img.convert("RGB"))
     return img
 
-def _consenso_2filtros(client, img_base, prompt, modelo) -> dict:
+def _filtro_medio(img: Image.Image) -> Image.Image:
     """
-    Analiza la misma imagen con 2 filtros distintos y hace consenso.
-    Filtro 1: preprocesamiento normal (contraste/nitidez)
-    Filtro 2: misma imagen con colores invertidos
-    Empate → gana el más grave.
+    Filtro de desempate: punto medio entre normal e invertido.
+    Contraste moderado + ecualización de histograma para maximizar
+    legibilidad sin invertir colores.
+    """
+    from PIL import ImageOps
+    # Contraste intermedio (entre 2.2 normal y 2.5 invertido)
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = ImageEnhance.Sharpness(img).enhance(2.5)
+    # Ecualización: redistribuye tonos para mejorar contraste local
+    img = ImageOps.equalize(img.convert("RGB"))
+    return img
+
+
+def _prompt_desempate(fecha_minima_str=None) -> str:
+    """
+    Prompt mínimo para el tercer análisis de desempate.
+    Solo puede responder VIGENTE o VENCIDA — fuerza la decisión.
+    """
+    if fecha_minima_str:
+        try:
+            anio_min = int(fecha_minima_str.split("/")[-1])
+        except:
+            anio_min = 2024
+        regla = (
+            f"Año >= {anio_min} → VIGENTE. Año < {anio_min} → VENCIDA. "
+            f"Ejemplo: {anio_min}→VIGENTE, {anio_min-1}→VENCIDA."
+        )
+    else:
+        regla = "Año >= 2025 → VIGENTE. Año < 2025 → VENCIDA. Ejemplo: 2025→VIGENTE, 2024→VENCIDA."
+
+    return (
+        "Lee la fecha de vencimiento en esta tapa de lata.\n"
+        f"{regla}\n"
+        "Debes responder ÚNICAMENTE con VIGENTE o VENCIDA. "
+        "Si no puedes leer el año con certeza, elige el más probable según lo que ves.\n"
+        "Responde SOLO con este JSON:\n"
+        '{"estado":"VIGENTE|VENCIDA","fecha_leida":"texto o null","confianza":0.00,"descripcion":"qué viste"}'
+    )
+
+
+def _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str=None) -> dict:
+    """
+    Analiza la misma imagen con 2 filtros:
+      Filtro 1 (normal):    contraste + nitidez estándar
+      Filtro 2 (invertido): mismo + inversión de colores
+    Si hay unanimidad → ese estado gana.
+    Si empate VIGENTE vs VENCIDA → tercer análisis con filtro medio,
+      que SOLO puede votar VIGENTE o VENCIDA → decide.
+    Para otros empates (ej. ILEGIBLE vs algo) → gana el más grave.
     """
     variantes = [
         ("normal",    _filtro_normal(img_base.copy())),
@@ -475,7 +520,6 @@ def _consenso_2filtros(client, img_base, prompt, modelo) -> dict:
         except Exception:
             resultados[nombre] = None
 
-    # Recolectar válidos
     validos = [r for r in resultados.values() if r]
 
     if not validos:
@@ -490,24 +534,46 @@ def _consenso_2filtros(client, img_base, prompt, modelo) -> dict:
         }
 
     conteo = Counter(r["estado"] for r in validos)
-    max_votos = conteo.most_common(1)[0][1]
-    n_validos = len(validos)
+    estados = list(conteo.keys())
 
-    if max_votos == n_validos:
-        # Unanimidad
+    # ── Unanimidad o mayoría clara ────────────────────────────────────────
+    max_votos = conteo.most_common(1)[0][1]
+    if max_votos == len(validos):
         ganador = conteo.most_common(1)[0][0]
-    elif max_votos > 1:
-        # Mayoría
-        ganador = conteo.most_common(1)[0][0]
+        usar_desempate = False
+    # ── Empate VIGENTE vs VENCIDA → activar tercer filtro ────────────────
+    elif set(estados) == {"VIGENTE", "VENCIDA"}:
+        usar_desempate = True
+        # Aplicar filtro medio con prompt restrictivo
+        try:
+            img_medio = _filtro_medio(img_base.copy())
+            b64_medio = pil_b64(img_medio)
+            prompt_d = _prompt_desempate(fecha_minima_str)
+            res_d = llamar_claude(client, b64_medio, prompt_d, modelo)
+            if res_d and isinstance(res_d, dict) and res_d.get("estado") in ("VIGENTE", "VENCIDA"):
+                ganador = res_d["estado"]
+                resultados["medio_desempate"] = res_d
+                conteo[ganador] = conteo.get(ganador, 0) + 1
+            else:
+                # Si el desempate falla también → VENCIDA (conservador)
+                ganador = "VENCIDA"
+                resultados["medio_desempate"] = None
+        except Exception:
+            ganador = "VENCIDA"
+            resultados["medio_desempate"] = None
+    # ── Otros empates → gana el más grave ────────────────────────────────
     else:
-        # Empate 1-1 → gana el más grave
+        usar_desempate = False
         ganador = max(conteo.keys(), key=lambda s: _PRIO_ESTADO.get(s, 0))
 
-    ganadoras = [r for r in validos if r["estado"] == ganador]
+    ganadoras = [r for r in resultados.values() if r and r.get("estado") == ganador]
+    if not ganadoras:
+        ganadoras = validos
     confianza_prom = round(sum(r.get("confianza", 0.5) for r in ganadoras) / len(ganadoras), 3)
     fecha = next((r.get("fecha_leida") for r in ganadoras if r.get("fecha_leida")), None)
     desc = next((r.get("descripcion", "") for r in ganadoras if r.get("descripcion")), "")
 
+    fuente = "Claude(2fil+desempate)" if usar_desempate else "Claude(2fil)"
     log_filtros = {
         k: (v.get("estado", "ERROR") if v else "ERROR")
         for k, v in resultados.items()
@@ -518,13 +584,13 @@ def _consenso_2filtros(client, img_base, prompt, modelo) -> dict:
         "fecha_leida": fecha,
         "confianza": confianza_prom,
         "descripcion": desc,
-        "fuente": "Claude(2fil)",
+        "fuente": fuente,
         "_filtros": log_filtros,
         "_votos": dict(conteo)
     }
 
 
-def consenso_claude_etiqueta(client, img: Image.Image, prompt: str, modelo: str, n_votaciones: int = 1) -> dict:
+def consenso_claude_etiqueta(client, img: Image.Image, prompt: str, modelo: str, n_votaciones: int = 1, fecha_minima_str: str = None) -> dict:
     """
     n_votaciones rondas independientes, cada una con 2 filtros (normal + invertido).
     Total llamadas = n_votaciones × 2.
@@ -539,14 +605,14 @@ def consenso_claude_etiqueta(client, img: Image.Image, prompt: str, modelo: str,
         img_base = img.copy()
 
     if n_votaciones == 1:
-        res = _consenso_2filtros(client, img_base, prompt, modelo)
+        res = _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str)
         res["fuente"] = "Claude(2fil×1)"
         return res
 
     # Múltiples rondas
     rondas = []
     for _ in range(n_votaciones):
-        r = _consenso_2filtros(client, img_base, prompt, modelo)
+        r = _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str)
         rondas.append(r)
 
     conteo = Counter(v["estado"] for v in rondas)
@@ -1300,17 +1366,43 @@ with tab_insp:
     st.markdown(
         f"#### Subir imágenes <span style='color:#5a7a9a;font-size:13px'>({n_lote} latas · 2 fotos por lata)</span>",
         unsafe_allow_html=True)
-    cu1, cu2 = st.columns(2)
-    with cu1:
-        fotos_c = st.file_uploader(
-            f"📸 CUERPO ({n_lote} fotos)",
-            type=["jpg","jpeg","png","webp","bmp"],
-            accept_multiple_files=True, key="fc")
-    with cu2:
-        fotos_e = st.file_uploader(
-            f"🏷️ ETIQUETA/TAPA ({n_lote} fotos)",
-            type=["jpg","jpeg","png","webp","bmp"],
-            accept_multiple_files=True, key="fe")
+
+    # ── Modo de subida ───────────────────────────────────────────────────
+    modo_subida = st.radio(
+        "Modo de subida",
+        ["📁 Carpetas (arrastra la carpeta completa)", "🖼️ Archivos individuales"],
+        horizontal=True, key="modo_subida",
+        help="Carpetas: sube directamente la carpeta de cuerpos y la de etiquetas. "
+             "El orden original de la carpeta se respeta (orden alfanumérico del nombre de archivo)."
+    )
+
+    TIPOS_IMG = ["jpg", "jpeg", "png", "webp", "bmp"]
+
+    if modo_subida.startswith("📁"):
+        st.info(
+            "Selecciona la carpeta completa arrastrándola al uploader. "
+            "Los archivos se ordenan por nombre (orden original de la carpeta).",
+            icon="📁"
+        )
+        cu1, cu2 = st.columns(2)
+        with cu1:
+            fotos_c = st.file_uploader(
+                f"📁 Carpeta CUERPOS",
+                type=TIPOS_IMG, accept_multiple_files=True, key="fc_folder")
+        with cu2:
+            fotos_e = st.file_uploader(
+                f"📁 Carpeta ETIQUETAS/TAPAS",
+                type=TIPOS_IMG, accept_multiple_files=True, key="fe_folder")
+    else:
+        cu1, cu2 = st.columns(2)
+        with cu1:
+            fotos_c = st.file_uploader(
+                f"📸 CUERPO ({n_lote} fotos)",
+                type=TIPOS_IMG, accept_multiple_files=True, key="fc")
+        with cu2:
+            fotos_e = st.file_uploader(
+                f"🏷️ ETIQUETA/TAPA ({n_lote} fotos)",
+                type=TIPOS_IMG, accept_multiple_files=True, key="fe")
 
     if fotos_c or fotos_e:
         nc_u = len(fotos_c) if fotos_c else 0
@@ -1319,11 +1411,12 @@ with tab_insp:
         if nc_u != ne_u:
             st.warning(f"Cuerpos: {nc_u} · Etiquetas: {ne_u} → se analizarán {pares} pares.", icon="⚠️")
         else:
-            st.success(f"{pares} pares listos.", icon="✅")
+            st.success(f"{pares} pares listos (orden por nombre de archivo).", icon="✅")
 
     puede = client and fotos_c and fotos_e and len(fotos_c) > 0 and len(fotos_e) > 0
 
     if st.button("🔬 INICIAR INSPECCIÓN", disabled=not puede, type="primary"):
+        # Ordenar siempre por nombre para respetar orden original de carpeta
         fc_s = sorted(fotos_c, key=lambda f: f.name)
         fe_s = sorted(fotos_e, key=lambda f: f.name)
         total = min(len(fc_s), len(fe_s))
@@ -1382,7 +1475,7 @@ with tab_insp:
             _fm = st.session_state.get("fecha_minima_str")
             _prompt_e = construir_prompt_etiqueta(_fm) if _fm else PROMPT_ETIQUETA
 
-            res_e = consenso_claude_etiqueta(client, img_e, _prompt_e, modelo_sel, intentos)
+            res_e = consenso_claude_etiqueta(client, img_e, _prompt_e, modelo_sel, intentos, fecha_minima_str=_fm)
 
             # ── Decisión NC ──────────────────────────────────────────────
             _modo_estricto = st.session_state.get("modo_estricto", False)
