@@ -293,89 +293,88 @@ Responde SOLO con este JSON sin texto adicional:
 def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
     """
     Prompt OCR para Claude Vision — lectura de fechas en tapas de lata.
-    v3: manejo explícito del patrón 202X con dígito cortado por borde anular.
+    v4: anti-alucinación estricta, ILEGIBLE para dígito ambiguo, soporte
+    tapas doradas/oxidadas, compatible con datasets mixtos vigente/vencida.
     """
     if fecha_minima_str:
         try:
             anio_min = int(fecha_minima_str.split("/")[-1])
         except:
             anio_min = 2024
-        ej_vigente = f"{anio_min}→VIGENTE, {anio_min+1}→VIGENTE, {anio_min+2}→VIGENTE"
-        ej_vencida = f"{anio_min-1}→VENCIDA, {anio_min-2}→VENCIDA, {anio_min-3}→VENCIDA"
+        ej_vigente = ", ".join(f"{anio_min+i}→VIGENTE" for i in range(3))
+        ej_vencida = ", ".join(f"{anio_min-i-1}→VENCIDA" for i in range(3))
         regla = (
-            f"REGLA DE VIGENCIA:\n"
-            f"- Año {anio_min} o MAYOR (>=) → VIGENTE\n"
-            f"- Año {anio_min-1} o MENOR (<) → VENCIDA\n"
-            f"- Ejemplos VIGENTE: {ej_vigente}\n"
-            f"- Ejemplos VENCIDA: {ej_vencida}\n"
-            f"IMPORTANTE: El año {anio_min} es VIGENTE, NO vencida."
+            f"REGLA DE VIGENCIA (fecha mínima configurada: {fecha_minima_str}):\n"
+            f"- Año >= {anio_min} → VIGENTE  (ejemplos: {ej_vigente})\n"
+            f"- Año < {anio_min}  → VENCIDA  (ejemplos: {ej_vencida})\n"
+            f"ATENCIÓN: Lee el año con cuidado. Un año {anio_min-1} es VENCIDA, "
+            f"un año {anio_min} es VIGENTE. No los confundas."
         )
-        # Año de inferencia para el patrón 202X: el más reciente dentro del rango vigente
-        anio_inferencia = max(anio_min, 2025)
     else:
         regla = (
-            "REGLA DE VIGENCIA:\n"
-            "- Año 2024 o MAYOR (>=) → VIGENTE\n"
-            "- Año 2023 o MENOR (<) → VENCIDA\n"
-            "- Ejemplos VIGENTE: 2024→VIGENTE, 2025→VIGENTE, 2026→VIGENTE\n"
-            "- Ejemplos VENCIDA: 2023→VENCIDA, 2022→VENCIDA, 2021→VENCIDA\n"
-            "IMPORTANTE: El año 2024 es VIGENTE, NO vencida."
+            "REGLA DE VIGENCIA (fecha mínima: 01/01/2025):\n"
+            "- Año >= 2025 → VIGENTE  (ejemplos: 2025→VIGENTE, 2026→VIGENTE, 2027→VIGENTE)\n"
+            "- Año < 2025  → VENCIDA  (ejemplos: 2024→VENCIDA, 2023→VENCIDA, 2022→VENCIDA)\n"
+            "ATENCIÓN: Un año 2024 es VENCIDA, un año 2025 es VIGENTE. No los confundas."
         )
-        anio_inferencia = 2025
 
     return (
         "Eres un lector OCR especializado en fechas de vencimiento en tapas metálicas de latas de conserva.\n\n"
 
-        "PASO 1 — IDENTIFICA QUÉ MUESTRA LA IMAGEN\n"
-        "A) TAPA CIRCULAR: disco metálico redondo con texto impreso en dot-matrix, visto desde arriba/abajo. "
-        "Aquí puede haber fecha → continúa al PASO 2.\n"
-        "B) CUERPO LATERAL: superficie cilíndrica con costillas/anillos horizontales concéntricos. "
-        'Sin fecha. Responde: {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"cuerpo lateral sin tapa"}\n'
-        "C) ETIQUETA DECORATIVA con logo/marca (CERTIFIED QUALITY, ARGENTINA, YOUNGS TOWN, etc.): "
-        'Sin fecha de vencimiento. Responde: {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"etiqueta decorativa sin fecha"}\n\n'
+        "PASO 1 — IDENTIFICA EL TIPO DE IMAGEN\n"
+        "A) TAPA CIRCULAR: disco metálico redondo con texto dot-matrix, visto desde arriba o abajo."
+        " → Continúa al PASO 2.\n"
+        "B) CUERPO LATERAL: superficie cilíndrica con costillas/anillos horizontales."
+        ' → {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"cuerpo lateral"}\n'
+        "C) ETIQUETA DECORATIVA con logo/marca (CERTIFIED QUALITY, ARGENTINA, YOUNGS TOWN, etc.)."
+        ' → {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"etiqueta decorativa"}\n\n'
 
-        "PASO 2 — LEE LA FECHA (solo si es TAPA CIRCULAR)\n"
-        "Busca las palabras clave: EXPIRY DATE, EXP, BEST BEFORE, BB, VENCE, FECHA VTO\n"
-        "Ignora: nombres de marca, CERTIFIED, números de lote, códigos alfanuméricos de producción\n"
-        "El año son SIEMPRE 4 dígitos que empiezan con 20: 2022, 2023, 2024, 2025, 2026...\n"
-        "Formatos comunes en estas latas: DDMMMYYYY · DD MMM YYYY · DD/MM/YYYY\n"
-        "Ejemplos reales observados en este tipo de lata:\n"
-        "  '16FEB2025' → año=2025 → VIGENTE\n"
-        "  '06 FEB 2025' → año=2025 → VIGENTE\n"
-        "  '24 MAR 2025' → año=2025 → VIGENTE\n"
-        "  '25 NOV 2023' → año=2023 → VENCIDA\n"
-        "  '06 FEB 2023' → año=2023 → VENCIDA\n\n"
+        "PASO 2 — LEE LA FECHA (solo si confirmaste TAPA CIRCULAR en el PASO 1)\n"
+        "Busca las etiquetas de fecha: EXPIRY DATE, EXP, BEST BEFORE, BB, VENCE, FECHA VTO\n"
+        "Ignora completamente: nombres de marca, códigos de lote, números de producción alfanuméricos\n"
+        "El año de vencimiento son SIEMPRE 4 dígitos comenzando con 20: 2022, 2023, 2024, 2025...\n\n"
+        "Formatos de fecha comunes en estas latas (lee CADA dígito con atención):\n"
+        "  '16FEB2025' → día=16, mes=FEB, año=2025\n"
+        "  '06 FEB 2025' → día=06, mes=FEB, año=2025\n"
+        "  '25 NOV 2023' → día=25, mes=NOV, año=2023 → VENCIDA\n"
+        "  '19JUN2024'   → día=19, mes=JUN, año=2024\n"
+        "  '18 AUG 2022' → día=18, mes=AUG, año=2022 → VENCIDA\n"
+        "  '06 JUN 2022' → día=06, mes=JUN, año=2022 → VENCIDA\n\n"
+        "ATENCIÓN con tapas doradas, oxidadas o rayadas:\n"
+        "  - Las tapas oxidadas tienen manchas naranjas/café: son óxido, NO texto\n"
+        "  - Las tapas rayadas tienen líneas oscuras: son rayaduras, NO letras\n"
+        "  - Lee solo los puntos del texto dot-matrix, ignora el resto\n\n"
 
         + regla + "\n\n"
 
-        "PASO 3 — CASO CRÍTICO: DÍGITO FINAL DEL AÑO CORTADO POR EL BORDE ANULAR\n"
-        "Las tapas tienen anillos concéntricos metálicos. El texto dot-matrix se imprime\n"
-        "en el área plana central y a veces el ÚLTIMO DÍGITO del año queda parcialmente\n"
-        "tapado o cortado por el borde del primer anillo.\n\n"
-        "REGLA ANTI-ALUCINACIÓN para este patrón:\n"
-        "  - Si lees claramente 'EXPIRY DATE' o 'EXP' Y ves '06 FEB 202_' o 'DD MMM 202_'\n"
-        "    donde el último dígito está cortado o es ambiguo:\n"
-        "    → NUNCA reportes VENCIDA basándote en un dígito que no ves con certeza\n"
-        f"   → Infiere el año como {anio_inferencia} (año vigente más probable de este proveedor)\n"
-        f"   → Reporta: estado=VIGENTE, fecha_leida='DD MMM {anio_inferencia}', confianza=0.65\n"
-        "    → descripcion: 'DD MMM 202X — último dígito parcialmente cortado, inferido como "
-        f"{anio_inferencia}'\n\n"
-        "  - Este patrón '202_' con dígito cortado NUNCA debe producir VENCIDA con año inventado\n"
-        "    (como 2023 o 2022) si no lees claramente ese dígito.\n\n"
+        "PASO 3 — REGLA ANTI-ALUCINACIÓN: DÍGITO FINAL DEL AÑO\n"
+        "Las tapas tienen anillos concéntricos metálicos. El texto dot-matrix está en el área\n"
+        "plana central. A veces el ÚLTIMO DÍGITO del año queda en el borde de esa área.\n\n"
+        "El borde anular forma un ARCO CURVO que puede parecer un dígito (especialmente '3').\n"
+        "Para evitar confusiones, aplica estas reglas ESTRICTAS:\n\n"
+        "  REGLA A — Solo reporta un dígito si ves claramente sus PUNTOS dot-matrix propios:\n"
+        "    ✓ Puntos negros discretos formando el número = dígito real\n"
+        "    ✗ Línea curva continua del borde metálico = NO es un dígito\n\n"
+        "  REGLA B — Si el último dígito del año NO tiene puntos dot-matrix claros:\n"
+        "    → Reporta: estado=ILEGIBLE, fecha_leida='DD MMM 202?', confianza=0.45\n"
+        "    → NUNCA reportes un año específico (como 2023) si no viste sus puntos con certeza\n\n"
+        "  REGLA C — Si ves claramente '202' y el cuarto dígito es AMBIGUO o parece\n"
+        "    el arco del anillo metálico, usa ILEGIBLE, NO inventes el dígito.\n\n"
 
         "PASO 4 — CLASIFICA\n"
-        "- Año claramente legible → aplica REGLA DE VIGENCIA\n"
-        "- Patrón '202_' con dígito cortado → aplica CASO CRÍTICO (PASO 3)\n"
-        "- Texto presente pero año completamente ilegible → ILEGIBLE\n"
-        "- Sin texto de fecha → SIN_FECHA\n\n"
+        "- Todos los dígitos del año visibles y claros → aplica REGLA DE VIGENCIA\n"
+        "- Último dígito del año ambiguo o cortado → ILEGIBLE (confianza 0.45)\n"
+        "- Texto presente pero año completamente ilegible → ILEGIBLE (confianza 0.30)\n"
+        "- Sin texto de fecha → SIN_FECHA (confianza 0.05)\n\n"
 
-        "CONFIANZA:\n"
-        "0.85-1.00: año perfectamente legible (todos los dígitos claros)\n"
-        "0.65-0.84: año legible con leve duda o dígito parcial inferido\n"
-        "0.30-0.64: duda significativa sobre el año → considera ILEGIBLE\n\n"
+        "ESCALA DE CONFIANZA:\n"
+        "0.85-1.00: todos los dígitos del año perfectamente claros\n"
+        "0.70-0.84: año legible con leve duda en 1 dígito pero identificable\n"
+        "0.50-0.69: duda significativa → si es el último dígito del año, usar ILEGIBLE\n"
+        "0.30-0.49: no puedes confirmar el año → usar ILEGIBLE\n\n"
 
         "Responde SOLO con JSON válido, sin texto adicional ni markdown:\n"
-        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto o null","confianza":0.00,"descripcion":"descripcion breve de lo que viste"}'
+        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto o null","confianza":0.00,"descripcion":"que viste exactamente"}'
     )
 
 PROMPT_ETIQUETA = construir_prompt_etiqueta()
@@ -452,65 +451,136 @@ def llamar_claude(client, b64, prompt, modelo):
 # Prioridad de estados para desempate (mayor = más grave)
 _PRIO_ESTADO = {"VENCIDA": 4, "ILEGIBLE": 3, "SIN_FECHA": 2, "VIGENTE": 1, "ERROR": 0}
 
+def _detectar_tipo_tapa(img: Image.Image) -> str:
+    """
+    Detecta el tipo de tapa por análisis de canal RGB y varianza.
+    Retorna: 'plateada' | 'dorada' | 'oxidada'
+    """
+    import numpy as _np
+    arr = _np.array(img)
+    r_mean = float(arr[:, :, 0].mean())
+    g_mean = float(arr[:, :, 1].mean())
+    b_mean = float(arr[:, :, 2].mean())
+    brillo  = float(arr.mean())
+    std_val = float(arr.std())
+    rb_diff = r_mean - b_mean
+
+    # Oxidada: dominancia roja fuerte + bajo contraste (óxido llena el frame)
+    if rb_diff > 20 and std_val < 45:
+        return "oxidada"
+    # Dorada: dominancia amarilla (R>B y G>B)
+    if rb_diff > 12 and (g_mean - b_mean) > 6:
+        return "dorada"
+    return "plateada"
+
+
 def _filtro_normal(img: Image.Image) -> Image.Image:
-    """Preprocesamiento estándar: contraste + nitidez elevados."""
+    """Filtro 1: contraste + nitidez estándar para tapas plateadas."""
     img = ImageEnhance.Contrast(img).enhance(2.2)
     img = ImageEnhance.Sharpness(img).enhance(3.0)
     img = ImageEnhance.Brightness(img).enhance(1.15)
     return img
 
+
 def _filtro_brillante(img: Image.Image) -> Image.Image:
     """
-    Filtro 2: zoom central + brillo elevado para dígitos tenues o cortados al borde.
-    Detecta si la tapa es oscura/dorada y aplica corrección gamma en ese caso.
+    Filtro 2: zoom central (12%) + pipeline adaptativo según tipo de tapa.
+    - Plateada: brillo + contraste elevados
+    - Dorada: gamma 0.5 para aclarar sombras sin saturar
+    - Oxidada: desaturación del canal naranja + gamma 0.4
     """
     import numpy as _np
     w, h = img.size
-    # Zoom al centro eliminando el anillo exterior vacío
     margin = int(min(w, h) * 0.12)
-    img_zoom = img.crop((margin, margin, w - margin, h - margin))
-    img_zoom = img_zoom.resize((w, h), Image.LANCZOS)
+    img_z = img.crop((margin, margin, w - margin, h - margin))
+    img_z = img_z.resize((w, h), Image.LANCZOS)
 
-    # Detectar tipo de tapa por canales RGB
-    arr = _np.array(img_zoom)
-    r_mean = arr[:, :, 0].mean()
-    b_mean = arr[:, :, 2].mean()
-    es_oscura_o_dorada = (r_mean - b_mean > 12) or (arr.mean() < 110)
+    tipo = _detectar_tipo_tapa(img_z)
 
-    if es_oscura_o_dorada:
-        # Corrección gamma 0.5 para aclarar sombras sin saturar zonas claras
-        arr_f = arr.astype(_np.float32) / 255.0
-        arr_f = _np.power(arr_f, 0.5)
-        arr_f = (_np.clip(arr_f, 0, 1) * 255).astype(_np.uint8)
-        img_zoom = Image.fromarray(arr_f)
-        img_zoom = ImageEnhance.Contrast(img_zoom).enhance(2.5)
-        img_zoom = ImageEnhance.Sharpness(img_zoom).enhance(4.0)
+    if tipo == "oxidada":
+        # Convertir a HSV, reducir saturación del canal S para eliminar óxido naranja
+        arr = _np.array(img_z).astype(_np.float32) / 255.0
+        # Desaturar: mover hacia gris
+        gris = arr.mean(axis=2, keepdims=True)
+        arr = arr * 0.4 + gris * 0.6   # 40% color + 60% gris
+        # Gamma agresiva para aclarar
+        arr = _np.power(_np.clip(arr, 0, 1), 0.4)
+        arr = (_np.clip(arr, 0, 1) * 255).astype(_np.uint8)
+        img_z = Image.fromarray(arr)
+        img_z = ImageEnhance.Contrast(img_z).enhance(2.8)
+        img_z = ImageEnhance.Sharpness(img_z).enhance(4.0)
+
+    elif tipo == "dorada":
+        arr = _np.array(img_z).astype(_np.float32) / 255.0
+        arr = _np.power(arr, 0.5)      # gamma 0.5: aclara sombras
+        arr = (_np.clip(arr, 0, 1) * 255).astype(_np.uint8)
+        img_z = Image.fromarray(arr)
+        img_z = ImageEnhance.Contrast(img_z).enhance(2.5)
+        img_z = ImageEnhance.Sharpness(img_z).enhance(4.0)
+
+    else:  # plateada
+        img_z = ImageEnhance.Brightness(img_z).enhance(1.6)
+        img_z = ImageEnhance.Contrast(img_z).enhance(2.8)
+        img_z = ImageEnhance.Sharpness(img_z).enhance(3.5)
+
+    return img_z
+
+
+def _filtro_crop50(img: Image.Image) -> Image.Image:
+    """
+    Filtro 3 (desempate): crop agresivo al 50% central de la tapa.
+    Elimina TODOS los anillos metálicos concéntricos, dejando solo el área
+    plana central donde está el texto. Resuelve el problema del arco del
+    anillo que el modelo confunde con el dígito '3' o '5'.
+    Pipeline adaptativo por tipo de tapa, igual que _filtro_brillante.
+    """
+    import numpy as _np
+    from PIL import ImageDraw
+    w, h = img.size
+
+    # Crop al 50% central: elimina todos los anillos
+    margin = int(min(w, h) * 0.25)
+    img_crop = img.crop((margin, margin, w - margin, h - margin))
+    img_crop = img_crop.resize((w, h), Image.LANCZOS)
+
+    # Máscara circular adicional: oscurecer borde residual
+    cx, cy = w // 2, h // 2
+    r_mask = int(min(w, h) * 0.46)
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).ellipse(
+        [cx - r_mask, cy - r_mask, cx + r_mask, cy + r_mask], fill=255
+    )
+    fondo = Image.new("RGB", (w, h), (15, 15, 15))
+    img_crop = Image.composite(img_crop, fondo, mask)
+
+    tipo = _detectar_tipo_tapa(img_crop)
+
+    if tipo in ("oxidada", "dorada"):
+        arr = _np.array(img_crop).astype(_np.float32) / 255.0
+        if tipo == "oxidada":
+            gris = arr.mean(axis=2, keepdims=True)
+            arr = arr * 0.3 + gris * 0.7
+            gamma = 0.4
+        else:
+            gamma = 0.5
+        arr = _np.power(_np.clip(arr, 0, 1), gamma)
+        arr = (_np.clip(arr, 0, 1) * 255).astype(_np.uint8)
+        img_crop = Image.fromarray(arr)
+        img_crop = ImageEnhance.Contrast(img_crop).enhance(3.0)
+        img_crop = ImageEnhance.Sharpness(img_crop).enhance(4.5)
     else:
-        img_zoom = ImageEnhance.Brightness(img_zoom).enhance(1.6)
-        img_zoom = ImageEnhance.Contrast(img_zoom).enhance(2.8)
-        img_zoom = ImageEnhance.Sharpness(img_zoom).enhance(3.5)
+        img_crop = ImageEnhance.Contrast(img_crop).enhance(3.0)
+        img_crop = ImageEnhance.Sharpness(img_crop).enhance(4.0)
+        img_crop = ImageEnhance.Brightness(img_crop).enhance(1.4)
 
-    return img_zoom
-
-def _filtro_medio(img: Image.Image) -> Image.Image:
-    """
-    Filtro de desempate: punto medio entre normal y brillante.
-    Contraste moderado + ecualización de histograma para maximizar
-    legibilidad sin invertir colores.
-    """
-    from PIL import ImageOps
-    # Contraste intermedio (entre 2.2 normal y 2.8 brillante)
-    img = ImageEnhance.Contrast(img).enhance(2.0)
-    img = ImageEnhance.Sharpness(img).enhance(2.5)
-    # Ecualización: redistribuye tonos para mejorar contraste local
-    img = ImageOps.equalize(img.convert("RGB"))
-    return img
+    return img_crop
 
 
 def _prompt_desempate(fecha_minima_str=None) -> str:
     """
-    Prompt mínimo para el tercer análisis de desempate.
-    Solo puede responder VIGENTE o VENCIDA — fuerza la decisión.
+    Prompt para el tercer análisis de desempate con crop 50%.
+    El modelo ve solo el área central limpia — sin anillos.
+    Puede responder VIGENTE, VENCIDA o ILEGIBLE.
     """
     if fecha_minima_str:
         try:
@@ -518,31 +588,32 @@ def _prompt_desempate(fecha_minima_str=None) -> str:
         except:
             anio_min = 2024
         regla = (
-            f"Año >= {anio_min} → VIGENTE. Año < {anio_min} → VENCIDA. "
+            f"Año >= {anio_min} → VIGENTE. Año < {anio_min} → VENCIDA.\n"
             f"Ejemplo: {anio_min}→VIGENTE, {anio_min-1}→VENCIDA."
         )
     else:
-        regla = "Año >= 2025 → VIGENTE. Año < 2025 → VENCIDA. Ejemplo: 2025→VIGENTE, 2024→VENCIDA."
+        regla = (
+            "Año >= 2025 → VIGENTE. Año < 2025 → VENCIDA.\n"
+            "Ejemplo: 2025→VIGENTE, 2024→VENCIDA."
+        )
 
     return (
-        "Lee la fecha de vencimiento en esta tapa de lata.\n"
-        f"{regla}\n"
-        "Debes responder ÚNICAMENTE con VIGENTE o VENCIDA. "
-        "Si no puedes leer el año con certeza, elige el más probable según lo que ves.\n"
-        "Responde SOLO con este JSON:\n"
-        '{"estado":"VIGENTE|VENCIDA","fecha_leida":"texto o null","confianza":0.00,"descripcion":"qué viste"}'
+        "Esta imagen muestra SOLO el área central de una tapa de lata, sin anillos metálicos.\n"
+        "Lee la fecha de vencimiento que ves.\n\n"
+        f"{regla}\n\n"
+        "REGLA CRÍTICA: Si el último dígito del año no está formado por puntos dot-matrix "
+        "claros (solo ves un arco o línea curva), responde ILEGIBLE.\n\n"
+        "Responde SOLO con este JSON (estado puede ser VIGENTE, VENCIDA o ILEGIBLE):\n"
+        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE","fecha_leida":"texto o null","confianza":0.00,"descripcion":"que viste"}'
     )
 
 
 def _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str=None) -> dict:
     """
-    Analiza la misma imagen con 2 filtros:
-      Filtro 1 (normal):    contraste + nitidez estándar
-      Filtro 2 (brillante): zoom central + brillo elevado
-    Si hay unanimidad → ese estado gana.
-    Si empate VIGENTE vs VENCIDA → tercer análisis con filtro medio,
-      que SOLO puede votar VIGENTE o VENCIDA → decide.
-    Para otros empates (ej. ILEGIBLE vs algo) → gana el más grave.
+    Analiza con 2 filtros (normal + brillante adaptativo).
+    Desempate con filtro 3 (crop 50% central) cuando:
+      - Hay empate VIGENTE vs VENCIDA
+      - Hay unanimidad VENCIDA pero confianza < 0.75 (posible alucinación)
     """
     variantes = [
         ("normal",    _filtro_normal(img_base.copy())),
@@ -562,86 +633,127 @@ def _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str=None) 
 
     if not validos:
         return {
-            "estado": "ILEGIBLE",
-            "fecha_leida": None,
-            "confianza": 0.10,
+            "estado": "ILEGIBLE", "fecha_leida": None, "confianza": 0.10,
             "descripcion": "Sin respuesta en ningún filtro",
-            "fuente": "Claude(2fil)",
-            "_filtros": {k: "ERROR" for k in resultados},
-            "_votos": {}
+            "fuente": "Claude(2fil)", "_filtros": {k: "ERROR" for k in resultados}, "_votos": {}
         }
 
     conteo = Counter(r["estado"] for r in validos)
     estados = list(conteo.keys())
-
-    # ── Unanimidad o mayoría clara ────────────────────────────────────────
     max_votos = conteo.most_common(1)[0][1]
+    usar_crop50 = False
+
+    # ── Unanimidad clara ───────────────────────────────────────────────────
     if max_votos == len(validos):
-        ganador = conteo.most_common(1)[0][0]
-        usar_desempate = False
-    # ── Empate VIGENTE vs VENCIDA → revisar si el año es ambiguo ─────────
-    elif set(estados) == {"VIGENTE", "VENCIDA"}:
-        usar_desempate = True
-        # Antes de llamar al tercer filtro: si ambos filtros leyeron "202X"
-        # y uno alucinó el dígito como vencido, favorecer VIGENTE directamente
-        fechas_leidas = [r.get("fecha_leida") or "" for r in validos]
-        patron_202x = any(
-            "202" in f and len(f) >= 3 and not any(
-                str(y) in f for y in range(2000, 2024)  # ningún año claramente vencido
-            )
-            for f in fechas_leidas if f
-        )
-        if patron_202x:
-            # La ambigüedad es por dígito cortado: VIGENTE es más seguro que inventar un año vencido
-            ganador = "VIGENTE"
-            usar_desempate = False
+        ganador_prev = conteo.most_common(1)[0][0]
+        conf_prom = sum(r.get("confianza", 0.5) for r in validos) / len(validos)
+
+        # Si unanimidad VENCIDA pero confianza < 0.75: posible alucinación del anillo
+        # Activar crop50 para confirmación
+        if ganador_prev == "VENCIDA" and conf_prom < 0.75:
+            usar_crop50 = True
         else:
-            # Empate real → activar tercer filtro
-            try:
-                img_medio = _filtro_medio(img_base.copy())
-                b64_medio = pil_b64(img_medio)
-                prompt_d = _prompt_desempate(fecha_minima_str)
-                res_d = llamar_claude(client, b64_medio, prompt_d, modelo)
-                if res_d and isinstance(res_d, dict) and res_d.get("estado") in ("VIGENTE", "VENCIDA"):
-                    ganador = res_d["estado"]
-                    resultados["medio_desempate"] = res_d
-                    conteo[ganador] = conteo.get(ganador, 0) + 1
-                else:
-                    ganador = "VENCIDA"
-                    resultados["medio_desempate"] = None
-            except Exception:
-                ganador = "VENCIDA"
-                resultados["medio_desempate"] = None
-    # ── Otros empates → gana el más grave ────────────────────────────────
+            ganador = ganador_prev
+            usar_crop50 = False
+
+    # ── Empate VIGENTE vs VENCIDA → siempre usar crop50 ───────────────────
+    elif set(estados) == {"VIGENTE", "VENCIDA"}:
+        usar_crop50 = True
+
+    # ── Otros empates → más grave ──────────────────────────────────────────
     else:
-        usar_desempate = False
         ganador = max(conteo.keys(), key=lambda s: _PRIO_ESTADO.get(s, 0))
+        usar_crop50 = False
+
+    # ── Filtro 3: crop 50% central ─────────────────────────────────────────
+    if usar_crop50:
+        try:
+            img_crop = _filtro_crop50(img_base.copy())
+            b64_crop = pil_b64(img_crop)
+            prompt_d = _prompt_desempate(fecha_minima_str)
+            res_d = llamar_claude(client, b64_crop, prompt_d, modelo)
+            if res_d and isinstance(res_d, dict) and res_d.get("estado") in ("VIGENTE", "VENCIDA", "ILEGIBLE"):
+                ganador = res_d["estado"]
+                resultados["crop50"] = res_d
+                conteo[ganador] = conteo.get(ganador, 0) + 1
+            else:
+                # Fallo del crop50: conservar lo que los 2 filtros dijeron
+                ganador = max(conteo.keys(), key=lambda s: _PRIO_ESTADO.get(s, 0))
+                resultados["crop50"] = None
+        except Exception:
+            ganador = max(conteo.keys(), key=lambda s: _PRIO_ESTADO.get(s, 0))
+            resultados["crop50"] = None
 
     ganadoras = [r for r in resultados.values() if r and r.get("estado") == ganador]
     if not ganadoras:
         ganadoras = validos
     confianza_prom = round(sum(r.get("confianza", 0.5) for r in ganadoras) / len(ganadoras), 3)
     fecha = next((r.get("fecha_leida") for r in ganadoras if r.get("fecha_leida")), None)
-    desc = next((r.get("descripcion", "") for r in ganadoras if r.get("descripcion")), "")
+    desc  = next((r.get("descripcion", "") for r in ganadoras if r.get("descripcion")), "")
 
-    fuente = "Claude(2fil+desempate)" if usar_desempate else "Claude(2fil)"
-    log_filtros = {
-        k: (v.get("estado", "ERROR") if v else "ERROR")
-        for k, v in resultados.items()
-    }
+    fuente = "Claude(2fil+crop50)" if usar_crop50 else "Claude(2fil)"
+    log_filtros = {k: (v.get("estado", "ERROR") if v else "ERROR") for k, v in resultados.items()}
 
     return {
-        "estado": ganador,
-        "fecha_leida": fecha,
-        "confianza": confianza_prom,
-        "descripcion": desc,
-        "fuente": fuente,
-        "_filtros": log_filtros,
-        "_votos": dict(conteo)
+        "estado": ganador, "fecha_leida": fecha, "confianza": confianza_prom,
+        "descripcion": desc, "fuente": fuente,
+        "_filtros": log_filtros, "_votos": dict(conteo)
     }
 
 
-def consenso_claude_etiqueta(client, img: Image.Image, prompt: str, modelo: str, n_votaciones: int = 1, fecha_minima_str: str = None) -> dict:
+def _reverificar_lote(client, resultados_lote, fe_archivos, modelo, fecha_minima_str, modo_estricto):
+    """
+    Re-análisis post-lote: relanza el análisis de etiqueta con _filtro_crop50
+    para las latas que tienen VENCIDA con confianza 0.50-0.74.
+    Estas son las candidatas a alucinación por el arco del anillo.
+    Actualiza el resultado in-place. Retorna el número de latas re-analizadas.
+    """
+    candidatas = [
+        (i, r) for i, r in enumerate(resultados_lote)
+        if r["etiqueta"].get("estado") == "VENCIDA"
+        and 0.50 <= r["etiqueta"].get("confianza", 0.0) < 0.75
+    ]
+    if not candidatas:
+        return 0
+
+    prompt_confirm = _prompt_desempate(fecha_minima_str)
+
+    for idx, lata in candidatas:
+        try:
+            # Reabrir la imagen de etiqueta original
+            fe_archivos[idx].seek(0)
+            img_e_orig = Image.open(fe_archivos[idx]).convert("RGB")
+
+            # Escalar a mínimo 1000px
+            w, h = img_e_orig.size
+            if min(w, h) < 1000:
+                f = 1000 / min(w, h)
+                img_e_orig = img_e_orig.resize((int(w*f), int(h*f)), Image.LANCZOS)
+
+            # Aplicar filtro crop50 y relanzar
+            img_crop = _filtro_crop50(img_e_orig)
+            b64_crop = pil_b64(img_crop)
+            res_nuevo = llamar_claude(client, b64_crop, prompt_confirm, modelo)
+
+            if res_nuevo and isinstance(res_nuevo, dict) and \
+               res_nuevo.get("estado") in ("VIGENTE", "VENCIDA", "ILEGIBLE"):
+                estado_nuevo = res_nuevo["estado"]
+                estado_viejo = lata["etiqueta"]["estado"]
+
+                # Solo actualizar si el resultado cambió
+                if estado_nuevo != estado_viejo:
+                    lata["etiqueta"]["estado"]     = estado_nuevo
+                    lata["etiqueta"]["confianza"]  = res_nuevo.get("confianza", 0.5)
+                    lata["etiqueta"]["fecha_leida"]= res_nuevo.get("fecha_leida",
+                                                     lata["etiqueta"].get("fecha_leida"))
+                    lata["etiqueta"]["descripcion"]= f"[reverif.] {res_nuevo.get('descripcion','')}"
+                    lata["etiqueta"]["fuente"]     = "Claude(crop50+reverif)"
+                    lata["etiqueta"]["_filtros"]   = {**lata["etiqueta"].get("_filtros", {}),
+                                                      "reverif_crop50": estado_nuevo}
+        except Exception:
+            pass   # Si falla la re-verificación, conservar el resultado original
+
+    return len(candidatas)
     """
     n_votaciones rondas independientes, cada una con 2 filtros (normal + brillante).
     Total llamadas = n_votaciones × 2.
@@ -1623,6 +1735,27 @@ with tab_insp:
 
         prog.progress(1.0, "✅ Inspección completada.")
         status.empty()
+
+        # ── Re-análisis post-lote: reverificar VENCIDAS con confianza baja ──
+        _fm_rev = st.session_state.get("fecha_minima_str")
+        _me_rev = st.session_state.get("modo_estricto", False)
+        n_reverif = _reverificar_lote(
+            client, resultados, fe_s, modelo_sel, _fm_rev, _me_rev
+        )
+        if n_reverif > 0:
+            # Recalcular X y obs con los resultados actualizados
+            X = 0; obs = 0; dudosas_count = 0
+            for lata in resultados:
+                nc2, motivo2, cat2 = es_nc(lata["cuerpo"], lata["etiqueta"], _me_rev)
+                lata["no_conforme"] = nc2
+                lata["motivo"]      = motivo2
+                lata["cat_etiqueta"]= cat2
+                if nc2:
+                    X += 1
+                elif lata["cuerpo"].get("clase") == "MENOR" or cat2 in ("dudosa", "ilegible"):
+                    obs += 1
+                if cat2 == "dudosa":
+                    dudosas_count += 1
 
         decision = "ACEPTADO" if X <= c_lote else "RECHAZADO"
         pp = X / total if total > 0 else 0
