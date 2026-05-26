@@ -1,7 +1,7 @@
 """
 Sistema de Inspección de Lotes – Distribuidora ANCO S.A.S.
 ISO 2859-1 · YOLOv8n + Claude Vision (retroalimentación opcional)
-FIX: 2 filtros por votación (normal + invertido) + prompt OCR reforzado anti-alucinación
+FIX: 2 filtros por votación (normal + brillante) + prompt OCR reforzado anti-alucinación
 """
 
 import streamlit as st
@@ -357,6 +357,12 @@ def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
         "0.60-0.84: año legible con leve duda | "
         "0.30-0.59: no puedes confirmar el año → usa ILEGIBLE\n\n"
 
+        "CASO ESPECIAL — dígito final del año cortado o borroso:\n"
+        "Si ves claramente \"EXPIRY DATE\" o \"EXP\" y lees \"202\" pero el último dígito\n"
+        "está cortado por el borde de la tapa o es ilegible:\n"
+        "- Si el texto visible es nítido y el formato es de conserva moderna → el año probable es 2025\n"
+        "- Usa confianza 0.65 y fecha_leida con el año inferido\n"
+        "- NO uses ILEGIBLE solo porque falta un dígito si el resto es claro\n\n"
         "Responde SOLO con JSON sin texto adicional ni markdown:\n"
         '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto o null","confianza":0.00,"descripcion":"qué leíste"}'
     )
@@ -442,26 +448,32 @@ def _filtro_normal(img: Image.Image) -> Image.Image:
     img = ImageEnhance.Brightness(img).enhance(1.15)
     return img
 
-def _filtro_invertido(img: Image.Image) -> Image.Image:
+def _filtro_brillante(img: Image.Image) -> Image.Image:
     """
-    Preprocesamiento con inversión de colores.
-    El texto grabado en relieve sobre metal claro (oscuro sobre claro)
-    se convierte en claro sobre oscuro — algunos modelos lo leen mejor así.
+    Filtro de refuerzo para dígitos tenues o cortados al borde de la tapa.
+    Aumenta el brillo para revelar texto casi invisible, sin invertir colores
+    (la inversión destruía dígitos parciales convirtiendo el fondo en ruido).
+    Además aplica un zoom central para ampliar el área del texto.
     """
-    from PIL import ImageOps
-    img = ImageEnhance.Contrast(img).enhance(2.5)
-    img = ImageEnhance.Sharpness(img).enhance(3.0)
-    img = ImageOps.invert(img.convert("RGB"))
+    # Zoom al centro donde suele estar el texto (elimina borde circular vacío)
+    w, h = img.size
+    margin = int(min(w, h) * 0.12)
+    img = img.crop((margin, margin, w - margin, h - margin))
+    img = img.resize((w, h), Image.LANCZOS)
+    # Brillo alto: revela texto tenue sin invertir
+    img = ImageEnhance.Brightness(img).enhance(1.6)
+    img = ImageEnhance.Contrast(img).enhance(2.8)
+    img = ImageEnhance.Sharpness(img).enhance(3.5)
     return img
 
 def _filtro_medio(img: Image.Image) -> Image.Image:
     """
-    Filtro de desempate: punto medio entre normal e invertido.
+    Filtro de desempate: punto medio entre normal y brillante.
     Contraste moderado + ecualización de histograma para maximizar
     legibilidad sin invertir colores.
     """
     from PIL import ImageOps
-    # Contraste intermedio (entre 2.2 normal y 2.5 invertido)
+    # Contraste intermedio (entre 2.2 normal y 2.8 brillante)
     img = ImageEnhance.Contrast(img).enhance(2.0)
     img = ImageEnhance.Sharpness(img).enhance(2.5)
     # Ecualización: redistribuye tonos para mejorar contraste local
@@ -500,7 +512,7 @@ def _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str=None) 
     """
     Analiza la misma imagen con 2 filtros:
       Filtro 1 (normal):    contraste + nitidez estándar
-      Filtro 2 (invertido): mismo + inversión de colores
+      Filtro 2 (brillante): zoom central + brillo elevado
     Si hay unanimidad → ese estado gana.
     Si empate VIGENTE vs VENCIDA → tercer análisis con filtro medio,
       que SOLO puede votar VIGENTE o VENCIDA → decide.
@@ -508,7 +520,7 @@ def _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str=None) 
     """
     variantes = [
         ("normal",    _filtro_normal(img_base.copy())),
-        ("invertido", _filtro_invertido(img_base.copy())),
+        ("brillante", _filtro_brillante(img_base.copy())),
     ]
 
     resultados = {}
@@ -592,7 +604,7 @@ def _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str=None) 
 
 def consenso_claude_etiqueta(client, img: Image.Image, prompt: str, modelo: str, n_votaciones: int = 1, fecha_minima_str: str = None) -> dict:
     """
-    n_votaciones rondas independientes, cada una con 2 filtros (normal + invertido).
+    n_votaciones rondas independientes, cada una con 2 filtros (normal + brillante).
     Total llamadas = n_votaciones × 2.
     """
     # Escalar la imagen base una sola vez
@@ -798,7 +810,7 @@ def reporte_pdf(resultados, N, n, c, decision, X, sid, correcciones_count, confi
     y = _cfg_row(y, "String del modelo", modelo_usado, color_val="#7aa3cc")
     n_votaciones = cfg.get("n_votaciones", 1)
     y = _cfg_row(y, "Votaciones por etiqueta", f"{n_votaciones} votación(es)")
-    y = _cfg_row(y, "Análisis por votación", "2 (filtro normal + filtro invertido)")
+    y = _cfg_row(y, "Análisis por votación", "2 (filtro normal + filtro brillante)")
     total_llamadas = n_votaciones * 2
     y = _cfg_row(y, "Llamadas Claude por etiqueta", f"{total_llamadas} llamadas",
                  color_val="#a78bfa")
@@ -997,99 +1009,167 @@ def reporte_pdf(resultados, N, n, c, decision, X, sid, correcciones_count, confi
         tmp.seek(0)
         return tmp, img_pil.size
 
-    # P3+ — Evidencia fotográfica
+    # ── Helper para dibujar una foto individual en el PDF ───────────────────
+    def _dibujar_foto(img_bytes, x_foto, y_foto, foto_w, foto_h):
+        if not img_bytes:
+            cv.setFillColor(colors.HexColor("#1a2744"))
+            cv.rect(x_foto, y_foto, foto_w, foto_h, fill=1, stroke=0)
+            return
+        try:
+            img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            tmp_buf, (iw, ih) = _pil_to_rl(img_pil, foto_w * 2.835, foto_h * 2.835)
+            from reportlab.lib.utils import ImageReader
+            rl_img = ImageReader(tmp_buf)
+            scale = min(foto_w / (iw / 2.835), foto_h / (ih / 2.835))
+            draw_w = (iw / 2.835) * scale
+            draw_h = (ih / 2.835) * scale
+            x_center = x_foto + (foto_w - draw_w) / 2
+            cv.drawImage(rl_img, x_center, y_foto, width=draw_w, height=draw_h,
+                         preserveAspectRatio=True, mask="auto")
+        except Exception:
+            cv.setFillColor(colors.HexColor("#1a2744"))
+            cv.rect(x_foto, y_foto, foto_w, foto_h, fill=1, stroke=0)
+
+    # Constantes de layout para ambas secciones
+    COLS      = 4          # 4 fotos por fila (más compacto, cada una ocupa W/4)
+    MARGEN_IZQ = 1.0*cm
+    ESPACIO_COL = 0.25*cm
+    foto_w_base = (W - 2*MARGEN_IZQ - (COLS-1)*ESPACIO_COL) / COLS
+    IMG_H     = 5.0*cm     # altura de cada foto
+    HEADER_H  = 1.1*cm     # espacio para el label encima de la foto
+    BLOQUE_H  = IMG_H + HEADER_H + 0.3*cm   # alto total por celda
+
+    def _color_cuerpo(clase):
+        """Color de borde según clase del cuerpo."""
+        return {
+            "CRITICO": colors.HexColor("#e55353"),
+            "MAYOR":   colors.HexColor("#e55353"),
+            "MENOR":   colors.HexColor("#f0b429"),
+        }.get(clase, colors.HexColor("#27c97e"))
+
+    def _color_etiqueta(estado):
+        """Color de borde según estado de etiqueta."""
+        if estado in ("VENCIDA", "SIN_FECHA", "ILEGIBLE"):
+            return colors.HexColor("#e55353")
+        if estado == "VIGENTE":
+            return colors.HexColor("#27c97e")
+        return colors.HexColor("#5a7a9a")
+
+    def _nueva_pagina_seccion(titulo):
+        cv.showPage()
+        cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0, 0, W, H, fill=1, stroke=0)
+        cv.setFillColor(colors.HexColor("#0d1f40")); cv.rect(0, H-36, W, 36, fill=1, stroke=0)
+        cv.setFont("Helvetica-Bold", 10); cv.setFillColor(colors.white)
+        cv.drawString(1.5*cm, H-22, titulo)
+        return H - 48
+
+    # ══ SECCIÓN A — CUERPOS (YOLO) ════════════════════════════════════════════
     cv.showPage()
     cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0, 0, W, H, fill=1, stroke=0)
-    cv.setFillColor(colors.HexColor("#0d1f40")); cv.rect(0, H-50, W, 50, fill=1, stroke=0)
+    cv.setFillColor(colors.HexColor("#3a7bd5")); cv.rect(0, H-50, W, 50, fill=1, stroke=0)
+    cv.setFillColor(colors.HexColor("#f0b429")); cv.rect(0, H-52, W, 3, fill=1, stroke=0)
     cv.setFont("Helvetica-Bold", 13); cv.setFillColor(colors.white)
-    cv.drawString(1.5*cm, H-30, f"EVIDENCIA FOTOGRÁFICA – TODAS LAS LATAS ({n} inspeccionadas)")
-    cv.setFont("Helvetica", 9); cv.setFillColor(colors.HexColor("#5a7a9a"))
-    cv.drawString(1.5*cm, H-44, "Cuerpo (izq) · Etiqueta (der) · Verde=Conforme · Rojo=No conforme · Amarillo=Obs")
+    cv.drawString(1.5*cm, H-30, f"INSPECCIÓN DE CUERPOS – YOLOv8n ({n} latas)")
+    cv.setFont("Helvetica", 9); cv.setFillColor(colors.HexColor("#c8d6e5"))
+    cv.drawString(1.5*cm, H-44, "Verde = CONFORME · Amarillo = MENOR · Rojo = MAYOR/CRÍTICO")
 
-    IMG_W = (W - 3.5*cm) / 2
-    IMG_H = 3.8*cm
-    BLOQUE_H = IMG_H + 1.4*cm
-    COLS = 2
-    MARGEN_IZQ = 1.2*cm
     y = H - 62
     col = 0
 
     for lata in resultados:
         if y - BLOQUE_H < 1.5*cm:
-            cv.showPage()
-            cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0, 0, W, H, fill=1, stroke=0)
-            cv.setFillColor(colors.HexColor("#0d1f40")); cv.rect(0, H-36, W, 36, fill=1, stroke=0)
-            cv.setFont("Helvetica-Bold", 10); cv.setFillColor(colors.white)
-            cv.drawString(1.5*cm, H-22, "EVIDENCIA FOTOGRÁFICA (continuación)")
-            y = H - 48; col = 0
+            y = _nueva_pagina_seccion("INSPECCIÓN DE CUERPOS (continuación)")
+            col = 0
 
-        nc = lata["no_conforme"]
-        clase = lata["cuerpo"].get("clase", "?")
-        estado = lata["etiqueta"].get("estado", "?")
-        conf_c = lata["cuerpo"].get("confianza", 0)
-        conf_e = lata["etiqueta"].get("confianza", 0)
+        nc      = lata["no_conforme"]
+        clase   = lata["cuerpo"].get("clase", "?")
+        conf_c  = lata["cuerpo"].get("confianza", 0)
+        fuente  = lata["cuerpo"].get("fuente", "YOLO")
+        corr    = lata.get("corregido", False)
 
-        if nc:
-            badge_color = colors.HexColor("#e55353"); badge_txt = "NO CONFORME"; bg_lata = colors.HexColor("#1a0707")
-        elif clase == "MENOR":
-            badge_color = colors.HexColor("#f0b429"); badge_txt = "OBSERVACION"; bg_lata = colors.HexColor("#1a1507")
-        else:
-            badge_color = colors.HexColor("#27c97e"); badge_txt = "CONFORME"; bg_lata = colors.HexColor("#071507")
+        bcolor = _color_cuerpo(clase)
+        x_foto = MARGEN_IZQ + col * (foto_w_base + ESPACIO_COL)
+        y_label = y - HEADER_H + 2
+        y_foto  = y - BLOQUE_H + 0.3*cm
 
-        x_bloque = MARGEN_IZQ + col * (W - 2*MARGEN_IZQ) / COLS
-        ancho_bloque = (W - 2*MARGEN_IZQ) / COLS - 0.3*cm
+        # Label encima
+        cv.setFont("Helvetica-Bold", 7); cv.setFillColor(bcolor)
+        cv.drawString(x_foto, y_label, f"#{lata['id']}")
+        cv.setFont("Helvetica", 6); cv.setFillColor(colors.HexColor("#c8d6e5"))
+        cv.drawString(x_foto, y_label - 9, f"{clase} {conf_c:.0%}")
+        if corr:
+            cv.setFillColor(colors.HexColor("#a78bfa"))
+            cv.drawString(x_foto, y_label - 17, "⚡corregido")
 
-        cv.setFillColor(bg_lata)
-        cv.roundRect(x_bloque, y - BLOQUE_H, ancho_bloque, BLOQUE_H, 3, fill=1, stroke=0)
-        cv.setStrokeColor(badge_color); cv.setLineWidth(0.8)
-        cv.roundRect(x_bloque, y - BLOQUE_H, ancho_bloque, BLOQUE_H, 3, fill=0, stroke=1)
+        # Borde de color
+        cv.setStrokeColor(bcolor); cv.setLineWidth(1.5)
+        cv.rect(x_foto, y_foto, foto_w_base, IMG_H, fill=0, stroke=1)
 
-        cv.setFont("Helvetica-Bold", 8); cv.setFillColor(badge_color)
-        cv.drawString(x_bloque + 4, y - 10, f"#{lata['id']}  {badge_txt}")
-        cv.setFont("Helvetica", 6.5); cv.setFillColor(colors.HexColor("#c8d6e5"))
-        info_txt = f"Cuerpo: {clase} {conf_c:.0%} | Etiqueta: {estado} {conf_e:.0%}"
-        cv.drawString(x_bloque + 4, y - 20, info_txt[:55])
-
-        # Votos de rotación en el PDF
-        votos_rot = lata["etiqueta"].get("_votos", {})
-        if votos_rot:
-            vstr = " | ".join(f"{k}:{v}v" for k, v in votos_rot.items())
-            cv.setFont("Helvetica", 5.5); cv.setFillColor(colors.HexColor("#3a7bd5"))
-            cv.drawString(x_bloque + 4, y - 29, vstr[:60])
-
-        foto_w = (ancho_bloque - 0.4*cm) / 2
-        foto_h = IMG_H
-        y_foto = y - BLOQUE_H + 0.2*cm
-
-        for foto_idx, img_key in enumerate(["img_cuerpo_bytes", "img_etiqueta_bytes"]):
-            _raw = lata.get(img_key)
-            img_pil = Image.open(io.BytesIO(_raw)).convert("RGB") if _raw else None
-            x_foto = x_bloque + 0.1*cm + foto_idx * (foto_w + 0.2*cm)
-            if img_pil:
-                try:
-                    tmp_buf, (iw, ih) = _pil_to_rl(img_pil, foto_w * 2.835, foto_h * 2.835)
-                    from reportlab.lib.utils import ImageReader
-                    rl_img = ImageReader(tmp_buf)
-                    scale = min(foto_w / (iw / 2.835), foto_h / (ih / 2.835))
-                    draw_w = (iw / 2.835) * scale
-                    draw_h = (ih / 2.835) * scale
-                    x_center = x_foto + (foto_w - draw_w) / 2
-                    cv.drawImage(rl_img, x_center, y_foto, width=draw_w, height=draw_h,
-                                 preserveAspectRatio=True, mask="auto")
-                except Exception:
-                    cv.setFillColor(colors.HexColor("#1a2744"))
-                    cv.rect(x_foto, y_foto, foto_w, foto_h, fill=1, stroke=0)
-            else:
-                cv.setFillColor(colors.HexColor("#1a2744"))
-                cv.rect(x_foto, y_foto, foto_w, foto_h, fill=1, stroke=0)
+        # Foto
+        _dibujar_foto(lata.get("img_cuerpo_bytes"), x_foto, y_foto, foto_w_base, IMG_H)
 
         col += 1
         if col >= COLS:
             col = 0
-            y -= BLOQUE_H + 0.3*cm
+            y -= BLOQUE_H + 0.2*cm
 
     if col > 0:
-        y -= BLOQUE_H + 0.3*cm
+        y -= BLOQUE_H + 0.2*cm
+
+    # ══ SECCIÓN B — ETIQUETAS (Claude Vision) ═════════════════════════════════
+    cv.showPage()
+    cv.setFillColor(colors.HexColor("#0b1120")); cv.rect(0, 0, W, H, fill=1, stroke=0)
+    cv.setFillColor(colors.HexColor("#6a3abd")); cv.rect(0, H-50, W, 50, fill=1, stroke=0)
+    cv.setFillColor(colors.HexColor("#f0b429")); cv.rect(0, H-52, W, 3, fill=1, stroke=0)
+    cv.setFont("Helvetica-Bold", 13); cv.setFillColor(colors.white)
+    cv.drawString(1.5*cm, H-30, f"INSPECCIÓN DE ETIQUETAS – Claude Vision ({n} latas)")
+    cv.setFont("Helvetica", 9); cv.setFillColor(colors.HexColor("#c8d6e5"))
+    cv.drawString(1.5*cm, H-44, "Verde = VIGENTE · Rojo = VENCIDA/ILEGIBLE/SIN_FECHA · Votos: normal|brillante")
+
+    y = H - 62
+    col = 0
+
+    for lata in resultados:
+        if y - BLOQUE_H < 1.5*cm:
+            y = _nueva_pagina_seccion("INSPECCIÓN DE ETIQUETAS (continuación)")
+            col = 0
+
+        estado  = lata["etiqueta"].get("estado", "?")
+        conf_e  = lata["etiqueta"].get("confianza", 0)
+        fecha   = lata["etiqueta"].get("fecha_leida") or ""
+        votos   = lata["etiqueta"].get("_votos", {})
+        fuente_e = lata["etiqueta"].get("fuente", "Claude")
+
+        bcolor = _color_etiqueta(estado)
+        x_foto = MARGEN_IZQ + col * (foto_w_base + ESPACIO_COL)
+        y_label = y - HEADER_H + 2
+        y_foto  = y - BLOQUE_H + 0.3*cm
+
+        # Label encima — ID + estado + confianza
+        cv.setFont("Helvetica-Bold", 7); cv.setFillColor(bcolor)
+        cv.drawString(x_foto, y_label, f"#{lata['id']} {estado}")
+        cv.setFont("Helvetica", 6); cv.setFillColor(colors.HexColor("#c8d6e5"))
+        cv.drawString(x_foto, y_label - 9, f"{conf_e:.0%} · {fecha[:12]}" if fecha else f"{conf_e:.0%}")
+        # Votos filtros
+        if votos:
+            vstr = " | ".join(f"{k}:{v}v" for k, v in votos.items())
+            cv.setFillColor(colors.HexColor("#3a7bd5"))
+            cv.drawString(x_foto, y_label - 17, vstr[:28])
+
+        # Borde de color
+        cv.setStrokeColor(bcolor); cv.setLineWidth(1.5)
+        cv.rect(x_foto, y_foto, foto_w_base, IMG_H, fill=0, stroke=1)
+
+        # Foto
+        _dibujar_foto(lata.get("img_etiqueta_bytes"), x_foto, y_foto, foto_w_base, IMG_H)
+
+        col += 1
+        if col >= COLS:
+            col = 0
+            y -= BLOQUE_H + 0.2*cm
+
+    if col > 0:
+        y -= BLOQUE_H + 0.2*cm
 
     cv.save()
     buf.seek(0)
@@ -1142,7 +1222,7 @@ with st.sidebar:
         f'<span style="color:#3a7bd5">● 2 FILTROS POR VOTACIÓN</span><br>'
         f'<span style="color:#5a7a9a">{intentos} votación(es) × 2 filtros = '
         f'<b style="color:#f0b429">{n_llamadas_est} llamadas</b> por etiqueta<br>'
-        f'Normal + Invertido · Empate → más grave</span>'
+        f'Normal + Brillante · Empate → más grave</span>'
         f'</div>', unsafe_allow_html=True
     )
 
