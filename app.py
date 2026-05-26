@@ -23,11 +23,18 @@ YOLO_DISPONIBLE = False
 YOLO_ERROR_MSG = ""
 np = cv2 = ort = None
 
+# numpy se importa SIEMPRE — requerido por filtros de imagen, independiente de YOLO
 try:
     import numpy as np
-    YOLO_DISPONIBLE = True
+    _numpy_ok = True
 except Exception as _e:
-    YOLO_ERROR_MSG = f"numpy: {_e}"
+    _numpy_ok = False
+    np = None
+
+if _numpy_ok:
+    YOLO_DISPONIBLE = True
+else:
+    YOLO_ERROR_MSG = "numpy no disponible"
 
 if YOLO_DISPONIBLE:
     try:
@@ -461,7 +468,6 @@ def _detectar_tipo_tapa(img: Image.Image) -> str:
     r_mean = float(arr[:, :, 0].mean())
     g_mean = float(arr[:, :, 1].mean())
     b_mean = float(arr[:, :, 2].mean())
-    brillo  = float(arr.mean())
     std_val = float(arr.std())
     rb_diff = r_mean - b_mean
 
@@ -535,7 +541,6 @@ def _filtro_crop50(img: Image.Image) -> Image.Image:
     Pipeline adaptativo por tipo de tapa, igual que _filtro_brillante.
     """
     import numpy as _np
-    from PIL import ImageDraw
     w, h = img.size
 
     # Crop al 50% central: elimina todos los anillos
@@ -701,7 +706,7 @@ def _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str=None) 
     }
 
 
-def _reverificar_lote(client, resultados_lote, fe_archivos, modelo, fecha_minima_str, modo_estricto):
+def _reverificar_lote(client, resultados_lote, fe_archivos, modelo, fecha_minima_str):
     """
     Re-análisis post-lote: relanza el análisis de etiqueta con _filtro_crop50
     para las latas que tienen VENCIDA con confianza 0.50-0.74.
@@ -754,9 +759,12 @@ def _reverificar_lote(client, resultados_lote, fe_archivos, modelo, fecha_minima
             pass   # Si falla la re-verificación, conservar el resultado original
 
     return len(candidatas)
+
+
+def consenso_claude_etiqueta(client, img: Image.Image, prompt: str, modelo: str, n_votaciones: int = 1, fecha_minima_str: str = None) -> dict:
     """
     n_votaciones rondas independientes, cada una con 2 filtros (normal + brillante).
-    Total llamadas = n_votaciones × 2.
+    Total llamadas = n_votaciones × 2 (+ hasta 1 extra por crop50 si hay desempate).
     """
     # Escalar la imagen base una sola vez
     w, h = img.size
@@ -1740,7 +1748,7 @@ with tab_insp:
         _fm_rev = st.session_state.get("fecha_minima_str")
         _me_rev = st.session_state.get("modo_estricto", False)
         n_reverif = _reverificar_lote(
-            client, resultados, fe_s, modelo_sel, _fm_rev, _me_rev
+            client, resultados, fe_s, modelo_sel, _fm_rev
         )
         if n_reverif > 0:
             # Recalcular X y obs con los resultados actualizados
