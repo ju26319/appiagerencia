@@ -12,7 +12,6 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 from PIL import Image, ImageEnhance, ImageDraw
 from collections import Counter
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── YOLO / cv2 / numpy ────────────────────────────────────────────────────────
 import os as _os
@@ -467,20 +466,25 @@ def _consenso_4rotaciones(client, img_proc, prompt, modelo) -> dict:
       5. fecha_leida = primera no-nula de las ganadoras
     """
     angulos = [0, 90, 180, 270]
-    args_list = [(client, img_proc, ang, prompt, modelo) for ang in angulos]
 
+    # Llamadas secuenciales — Streamlit Cloud no garantiza threading seguro
     resultados_por_angulo = {}
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        futuros = {ex.submit(_llamar_rotacion, args): args[2] for args in args_list}
-        for fut in as_completed(futuros):
-            ang, res = fut.result()
+    for ang in angulos:
+        try:
+            img_rot = rotar_imagen(img_proc, ang)
+            b64 = pil_b64(img_rot)
+            res = llamar_claude(client, b64, prompt, modelo)
+            if res:
+                res["_angulo"] = ang
             resultados_por_angulo[ang] = res
+        except Exception:
+            resultados_por_angulo[ang] = None
 
     # Recolectar respuestas válidas
     validos = []
     for ang in angulos:
         r = resultados_por_angulo.get(ang)
-        if r and "estado" in r:
+        if r and isinstance(r, dict) and "estado" in r:
             validos.append(r)
 
     if not validos:
@@ -539,10 +543,13 @@ def _consenso_4rotaciones(client, img_proc, prompt, modelo) -> dict:
     desc = desc_partes[0] if desc_partes else ""
 
     # Log de rotaciones para debugging
-    log_rot = {
-        ang: resultados_por_angulo.get(ang, {}).get("estado", "ERROR")
-        for ang in angulos
-    }
+    log_rot = {}
+    for ang in angulos:
+        r_ang = resultados_por_angulo.get(ang)
+        if r_ang and isinstance(r_ang, dict):
+            log_rot[ang] = r_ang.get("estado", "ERROR")
+        else:
+            log_rot[ang] = "ERROR" 
 
     return {
         "estado": ganador,
