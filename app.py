@@ -292,77 +292,58 @@ Responde SOLO con este JSON sin texto adicional:
 
 def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
     """
-    Prompt reforzado anti-alucinación:
-    - Requiere transcribir el texto exacto antes de clasificar
-    - SIN_FECHA obligatorio cuando no hay tapa circular visible
-    - Nunca inferir VIGENTE/VENCIDA sin año numérico explícito (4 dígitos)
-    - Regla de desempate: ante ambigüedad de año → ILEGIBLE, no VENCIDA
-    - Nota de rotación: la imagen puede estar a 0°/90°/180°/270°, leer en todas
+    Prompt ultra-corto optimizado para Claude Haiku.
+    Haiku rinde mejor con instrucciones directas y ejemplos concretos
+    en lugar de razonamiento multi-paso.
     """
     if fecha_minima_str:
         try:
             anio_min = int(fecha_minima_str.split("/")[-1])
         except:
             anio_min = 2024
-        regla_vigencia = (
-            f"REGLA DE VIGENCIA (aplica SOLO si leíste el año con total claridad):\n"
-            f"  - Año {anio_min} o posterior → VIGENTE\n"
-            f"  - Año anterior a {anio_min} → VENCIDA\n"
-            f"  - Si el año tiene cualquier dígito ambiguo → ILEGIBLE (no adivines)\n"
-            f"  EJEMPLOS con fecha_min={anio_min}: "
-            f"2026→VIGENTE, 2025→{'VIGENTE' if anio_min<=2025 else 'VENCIDA'}, "
-            f"2024→{'VIGENTE' if anio_min<=2024 else 'VENCIDA'}, 2023→VENCIDA, 2022→VENCIDA"
+        regla = (
+            f"Si el año es {anio_min} o mayor → VIGENTE. "
+            f"Si el año es menor que {anio_min} → VENCIDA. "
+            f"Ejemplos: 2025→{'VIGENTE' if anio_min<=2025 else 'VENCIDA'}, "
+            f"2024→{'VIGENTE' if anio_min<=2024 else 'VENCIDA'}, "
+            f"2023→VENCIDA, 2022→VENCIDA."
         )
     else:
-        regla_vigencia = (
-            "REGLA DE VIGENCIA (aplica SOLO si leíste el año con total claridad):\n"
-            "  - Año 2025 o posterior → VIGENTE\n"
-            "  - Año 2024 o anterior → VENCIDA\n"
-            "  - Si el año tiene cualquier dígito ambiguo → ILEGIBLE (no adivines)\n"
-            "  EJEMPLOS: 18FEB2025→VIGENTE, 31OCT2026→VIGENTE, DEC2024→VENCIDA, "
-            "NOV2023→VENCIDA, 15AUG2022→VENCIDA"
+        regla = (
+            "Si el año es 2025 o mayor → VIGENTE. "
+            "Si el año es 2024 o menor → VENCIDA. "
+            "Ejemplos: 2026→VIGENTE, 2025→VIGENTE, 2024→VENCIDA, 2023→VENCIDA."
         )
 
     return (
-        "Eres un sistema OCR especializado en leer fechas de vencimiento en tapas de latas de conserva.\n\n"
+        "Lee la fecha de vencimiento en esta imagen de una tapa de lata de conserva.\n\n"
 
-        "═══ PASO 1 — IDENTIFICAR SI HAY TAPA ═══\n"
-        "Primero determina QUÉ muestra la imagen:\n"
-        "  A) TAPA CIRCULAR: disco metálico circular visto desde arriba/abajo.\n"
-        "     → Solo aquí puede haber fecha. Continúa al PASO 2.\n"
-        "  B) CUERPO LATERAL: superficie cilíndrica con costillas/anillos horizontales.\n"
-        "     → NO hay fecha aquí. Responde INMEDIATAMENTE:\n"
-        '     {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"Imagen muestra cuerpo lateral, no tapa"}\n'
-        "  C) AMBIGUO o imagen muy oscura sin estructura clara:\n"
-        "     → Responde INMEDIATAMENTE:\n"
-        '     {"estado":"SIN_FECHA","fecha_leida":null,"confianza":0.05,"descripcion":"Imagen no muestra tapa circular"}\n\n'
+        "TIPOS DE IMAGEN:\n"
+        "- TAPA CIRCULAR (disco metálico visto desde arriba): busca la fecha aquí.\n"
+        "- CUERPO LATERAL (cilindro con costillas horizontales): NO hay fecha. Responde SIN_FECHA.\n"
+        "- ETIQUETA DECORATIVA (logo, texto de marca, CERTIFIED QUALITY, ARGENTINA): NO hay fecha de vencimiento. Responde SIN_FECHA.\n\n"
 
-        "═══ PASO 2 — LEER EL TEXTO (solo si es TAPA CIRCULAR) ═══\n"
-        "La imagen puede estar rotada 0°, 90°, 180° o 270°. Lee en TODAS las orientaciones.\n"
-        "Busca indicadores: EXP, EXPIRY, EXPR, EXP DATE, BB, BEST BEFORE, VENCE, CAD, TIR, BEST BY\n"
-        "IGNORAR completamente: CERTIFIED, QUALITY, ARGENTINA, PRODUCT OF, YOUNGS TOWN, nombres de marca.\n\n"
+        "CÓMO LEER LA FECHA:\n"
+        "- El texto puede estar rotado. Léelo en cualquier orientación.\n"
+        "- Busca: EXPIRY DATE, EXP, BEST BEFORE, BB, VENCE, CAD\n"
+        "- Ignora: nombres de marca, CERTIFIED, QUALITY, ARGENTINA, YOUNGS TOWN, códigos de lote\n"
+        "- El año son 4 dígitos: 2022, 2023, 2024, 2025, 2026...\n\n"
 
-        "TRANSCRIBE el texto exacto que ves (aunque esté al revés o rotado).\n"
-        "Luego identifica el AÑO: debe ser un número de 4 dígitos (ej: 2022, 2025, 2026).\n\n"
+        "FORMATOS COMUNES EN ESTAS LATAS:\n"
+        "- DD MMM YYYY (ej: 16 FEB 2025, 24 MAR 2025, 25 NOV 2023)\n"
+        "- EXPIRY DATE / DD MMM YYYY en dos líneas\n"
+        "- CHFOC E NNNNN / EXPIRY DATE / DD MMM YYYY en tres líneas\n\n"
 
-        "═══ PASO 3 — CLASIFICAR ═══\n"
-        + regla_vigencia + "\n\n"
+        + regla + "\n\n"
 
-        "REGLAS ABSOLUTAS — nunca violar:\n"
-        "  1. NUNCA declares VIGENTE o VENCIDA sin haber leído un año de 4 dígitos con claridad.\n"
-        "  2. Si ves texto pero no puedes confirmar el año → ILEGIBLE.\n"
-        "  3. Si no hay ningún texto en la tapa → SIN_FECHA.\n"
-        "  4. Ante cualquier ambigüedad de año → ILEGIBLE (es más seguro que adivinar).\n"
-        "  5. La confianza debe reflejar QUÉ TAN CLARO leíste el año, no tu intuición.\n\n"
+        "CONFIANZA:\n"
+        "- 0.90: año perfectamente claro\n"
+        "- 0.75: año legible con leve duda\n"
+        "- 0.50: texto visible pero año incierto\n"
+        "- 0.30: no puedes leer el año → usa ILEGIBLE\n\n"
 
-        "UMBRALES DE CONFIANZA — sé honesto:\n"
-        "  0.85-1.00: año de 4 dígitos completamente claro, sin ambigüedad\n"
-        "  0.60-0.84: año legible pero algún dígito con leve duda\n"
-        "  0.40-0.59: texto visible pero año no confirmable\n"
-        "  0.00-0.39: no puedes leer el año\n\n"
-
-        "Responde SOLO con este JSON sin texto adicional:\n"
-        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto o null","confianza":0.00,"descripcion":"texto que transcribiste y tu razonamiento breve"}'
+        "Responde SOLO con este JSON (sin texto adicional, sin markdown):\n"
+        '{"estado":"VIGENTE|VENCIDA|ILEGIBLE|SIN_FECHA","fecha_leida":"texto exacto leído o null","confianza":0.00,"descripcion":"qué viste"}'
     )
 
 PROMPT_ETIQUETA = construir_prompt_etiqueta()
@@ -383,20 +364,26 @@ def preproc(img, mn=640):
     img = ImageEnhance.Contrast(img).enhance(1.4)
     return ImageEnhance.Sharpness(img).enhance(1.8)
 
-def preproc_etiqueta(img, mn=800):
+def preproc_etiqueta(img, mn=1000):
     """
-    Preprocesamiento para tapas de lata:
-    - Escala mínima 800px para preservar texto en relieve
-    - Contraste y nitidez agresivos para texto grabado en metal
-    - Brillo ligeramente elevado para tapas oscuras
+    Preprocesamiento agresivo para tapas de lata con texto en relieve.
+    Optimizado para Haiku que necesita texto más claro que Sonnet.
+    - Escala mínima 1000px (mayor que antes) para preservar texto fino
+    - Contraste muy agresivo para resaltar relieve metálico
+    - Nitidez alta para texto grabado
+    - Brillo elevado para compensar tapas oscuras u opacas
     """
     w, h = img.size
+    # Escalar hasta mínimo 1000px en el lado corto
     if min(w, h) < mn:
         f = mn / min(w, h)
         img = img.resize((int(w*f), int(h*f)), Image.LANCZOS)
-    img = ImageEnhance.Contrast(img).enhance(1.8)
-    img = ImageEnhance.Sharpness(img).enhance(2.5)
-    img = ImageEnhance.Brightness(img).enhance(1.1)
+    # Contraste agresivo: resalta el grabado en metal
+    img = ImageEnhance.Contrast(img).enhance(2.2)
+    # Nitidez alta: hace el texto más definido
+    img = ImageEnhance.Sharpness(img).enhance(3.0)
+    # Brillo moderado: evita sobreexponer tapas claras
+    img = ImageEnhance.Brightness(img).enhance(1.15)
     return img
 
 def rotar_imagen(img: Image.Image, angulo: int) -> Image.Image:
