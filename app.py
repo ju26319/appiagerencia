@@ -1676,9 +1676,14 @@ with tab_insp:
     puede = client and fotos_c and fotos_e and len(fotos_c) > 0 and len(fotos_e) > 0
 
     if st.button("🔬 INICIAR INSPECCIÓN", disabled=not puede, type="primary"):
-        # Ordenar siempre por nombre para respetar orden original de carpeta
-        fc_s = sorted(fotos_c, key=lambda f: f.name)
-        fe_s = sorted(fotos_e, key=lambda f: f.name)
+        # Ordenamiento numérico natural: 1,2,3...10,11,12 (no 1,10,11,12...2,3)
+        # Divide el nombre en fragmentos texto+número para comparar correctamente
+        def _nat_key(f):
+            partes = re.split(r"(\d+)", f.name.lower())
+            return [int(p) if p.isdigit() else p for p in partes]
+
+        fc_s = sorted(fotos_c, key=_nat_key)
+        fe_s = sorted(fotos_e, key=_nat_key)
         total = min(len(fc_s), len(fe_s))
         resultados = []; X = 0; obs = 0; correcciones = 0; dudosas_count = 0
 
