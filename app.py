@@ -300,8 +300,11 @@ Responde SOLO con este JSON sin texto adicional:
 def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
     """
     Prompt OCR para Claude Vision — lectura de fechas en tapas de lata.
-    v4: anti-alucinación estricta, ILEGIBLE para dígito ambiguo, soporte
-    tapas doradas/oxidadas, compatible con datasets mixtos vigente/vencida.
+    v5: regla de vigencia anclada a umbral FIJO (no fecha actual), anti-alucinación
+    estricta, ILEGIBLE para dígito ambiguo, soporte tapas doradas/oxidadas.
+    CORRECCIÓN CRÍTICA: la comparación es contra la fecha de corte del sistema,
+    NO contra la fecha de hoy. Esto evita que fechas como JUN 2024 sean
+    incorrectamente clasificadas VENCIDA cuando el umbral configurado es 01/01/2024.
     """
     if fecha_minima_str:
         try:
@@ -311,17 +314,26 @@ def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
         ej_vigente = ", ".join(f"{anio_min+i}→VIGENTE" for i in range(3))
         ej_vencida = ", ".join(f"{anio_min-i-1}→VENCIDA" for i in range(3))
         regla = (
-            f"REGLA DE VIGENCIA (fecha mínima configurada: {fecha_minima_str}):\n"
-            f"- Año >= {anio_min} → VIGENTE  (ejemplos: {ej_vigente})\n"
-            f"- Año < {anio_min}  → VENCIDA  (ejemplos: {ej_vencida})\n"
-            f"ATENCIÓN: Lee el año con cuidado. Un año {anio_min-1} es VENCIDA, "
-            f"un año {anio_min} es VIGENTE. No los confundas."
+            f"REGLA DE VIGENCIA — UMBRAL FIJO DEL SISTEMA (NO uses la fecha actual de hoy):\n"
+            f"La fecha de corte configurada es: {fecha_minima_str}\n"
+            f"ÚNICO CRITERIO: compara el AÑO de la etiqueta contra {anio_min}\n"
+            f"- Año en etiqueta >= {anio_min} → VIGENTE  (ejemplos: {ej_vigente})\n"
+            f"- Año en etiqueta < {anio_min}  → VENCIDA  (ejemplos: {ej_vencida})\n"
+            f"IMPORTANTE: NO importa cuál es la fecha de hoy. Solo importa si el año\n"
+            f"de la etiqueta es >= {anio_min} (VIGENTE) o < {anio_min} (VENCIDA).\n"
+            f"Ejemplo: si la etiqueta dice '{anio_min}' → VIGENTE, aunque ya haya pasado.\n"
+            f"ATENCIÓN: Un año {anio_min-1} es VENCIDA, un año {anio_min} es VIGENTE."
         )
     else:
         regla = (
-            "REGLA DE VIGENCIA (fecha mínima: 01/01/2025):\n"
-            "- Año >= 2025 → VIGENTE  (ejemplos: 2025→VIGENTE, 2026→VIGENTE, 2027→VIGENTE)\n"
-            "- Año < 2025  → VENCIDA  (ejemplos: 2024→VENCIDA, 2023→VENCIDA, 2022→VENCIDA)\n"
+            "REGLA DE VIGENCIA — UMBRAL FIJO DEL SISTEMA (NO uses la fecha actual de hoy):\n"
+            "La fecha de corte configurada es: 01/01/2025\n"
+            "ÚNICO CRITERIO: compara el AÑO de la etiqueta contra 2025\n"
+            "- Año en etiqueta >= 2025 → VIGENTE  (ejemplos: 2025→VIGENTE, 2026→VIGENTE)\n"
+            "- Año en etiqueta < 2025  → VENCIDA  (ejemplos: 2024→VENCIDA, 2023→VENCIDA)\n"
+            "IMPORTANTE: NO importa cuál es la fecha de hoy. Solo importa si el año\n"
+            "de la etiqueta es >= 2025 (VIGENTE) o < 2025 (VENCIDA).\n"
+            "Ejemplo: si la etiqueta dice '2025' → VIGENTE, aunque ya haya pasado.\n"
             "ATENCIÓN: Un año 2024 es VENCIDA, un año 2025 es VIGENTE. No los confundas."
         )
 
@@ -345,8 +357,12 @@ def construir_prompt_etiqueta(fecha_minima_str: str = None) -> str:
         "  '06 FEB 2025' → día=06, mes=FEB, año=2025\n"
         "  '25 NOV 2023' → día=25, mes=NOV, año=2023 → VENCIDA\n"
         "  '19JUN2024'   → día=19, mes=JUN, año=2024\n"
+        "  '06JUN2022'   → día=06, mes=JUN, año=2022 → VENCIDA\n"
         "  '18 AUG 2022' → día=18, mes=AUG, año=2022 → VENCIDA\n"
-        "  '06 JUN 2022' → día=06, mes=JUN, año=2022 → VENCIDA\n\n"
+        "  '31OCT2024'   → día=31, mes=OCT, año=2024\n"
+        "ATENCIÓN con formato compacto sin espacios (p.ej. '19JUN2024'):\n"
+        "  El año son los ÚLTIMOS 4 dígitos después del mes en 3 letras.\n"
+        "  '19JUN2024': el mes es JUN, el año es 2024 (los cuatro dígitos finales).\n\n"
         "ATENCIÓN con tapas doradas, oxidadas o rayadas:\n"
         "  - Las tapas oxidadas tienen manchas naranjas/café: son óxido, NO texto\n"
         "  - Las tapas rayadas tienen líneas oscuras: son rayaduras, NO letras\n"
@@ -389,7 +405,7 @@ PROMPT_ETIQUETA = construir_prompt_etiqueta()
 # ══════════════════════════════════════════════════════════════════════════════
 # UTILIDADES DE IMAGEN
 # ══════════════════════════════════════════════════════════════════════════════
-def pil_b64(img, q=92):
+def pil_b64(img, q=95):
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="JPEG", quality=q)
     return base64.standard_b64encode(buf.getvalue()).decode()
@@ -402,17 +418,16 @@ def preproc(img, mn=640):
     img = ImageEnhance.Contrast(img).enhance(1.4)
     return ImageEnhance.Sharpness(img).enhance(1.8)
 
-def preproc_etiqueta(img, mn=1000):
+def preproc_etiqueta(img, mn=1200):
     """
     Preprocesamiento agresivo para tapas de lata con texto en relieve.
-    Optimizado para Haiku que necesita texto más claro que Sonnet.
-    - Escala mínima 1000px (mayor que antes) para preservar texto fino
+    FIX: mínimo 1200px (aumentado de 1000) para preservar nitidez dot-matrix.
     - Contraste muy agresivo para resaltar relieve metálico
     - Nitidez alta para texto grabado
     - Brillo elevado para compensar tapas oscuras u opacas
     """
     w, h = img.size
-    # Escalar hasta mínimo 1000px en el lado corto
+    # Escalar hasta mínimo 1200px en el lado corto
     if min(w, h) < mn:
         f = mn / min(w, h)
         img = img.resize((int(w*f), int(h*f)), Image.LANCZOS)
@@ -593,13 +608,17 @@ def _prompt_desempate(fecha_minima_str=None) -> str:
         except:
             anio_min = 2024
         regla = (
-            f"Año >= {anio_min} → VIGENTE. Año < {anio_min} → VENCIDA.\n"
-            f"Ejemplo: {anio_min}→VIGENTE, {anio_min-1}→VENCIDA."
+            f"UMBRAL FIJO DEL SISTEMA (ignora la fecha actual de hoy):\n"
+            f"Año en etiqueta >= {anio_min} → VIGENTE. Año en etiqueta < {anio_min} → VENCIDA.\n"
+            f"Ejemplo: {anio_min}→VIGENTE, {anio_min-1}→VENCIDA.\n"
+            f"Si la etiqueta dice '{anio_min}', clasifica VIGENTE aunque ya haya pasado."
         )
     else:
         regla = (
-            "Año >= 2025 → VIGENTE. Año < 2025 → VENCIDA.\n"
-            "Ejemplo: 2025→VIGENTE, 2024→VENCIDA."
+            "UMBRAL FIJO DEL SISTEMA (ignora la fecha actual de hoy):\n"
+            "Año en etiqueta >= 2025 → VIGENTE. Año en etiqueta < 2025 → VENCIDA.\n"
+            "Ejemplo: 2025→VIGENTE, 2024→VENCIDA.\n"
+            "Si la etiqueta dice '2025', clasifica VIGENTE aunque ya haya pasado."
         )
 
     return (
@@ -653,9 +672,11 @@ def _consenso_2filtros(client, img_base, prompt, modelo, fecha_minima_str=None) 
         ganador_prev = conteo.most_common(1)[0][0]
         conf_prom = sum(r.get("confianza", 0.5) for r in validos) / len(validos)
 
-        # Si unanimidad VENCIDA pero confianza < 0.75: posible alucinación del anillo
-        # Activar crop50 para confirmación
-        if ganador_prev == "VENCIDA" and conf_prom < 0.75:
+        # Si unanimidad VENCIDA pero confianza < 0.80: posible alucinación del anillo
+        # FIX: ampliado de 0.75 a 0.80 para capturar más casos borderline
+        # (incluye el error de lata #019: JUN 2024 clasificado VENCIDA con 92% — pero
+        # ese caso específico se resuelve mejor con el fix de la regla de vigencia)
+        if ganador_prev == "VENCIDA" and conf_prom < 0.80:
             usar_crop50 = True
         else:
             ganador = ganador_prev
@@ -716,7 +737,7 @@ def _reverificar_lote(client, resultados_lote, fe_archivos, modelo, fecha_minima
     candidatas = [
         (i, r) for i, r in enumerate(resultados_lote)
         if r["etiqueta"].get("estado") == "VENCIDA"
-        and 0.50 <= r["etiqueta"].get("confianza", 0.0) < 0.75
+        and 0.40 <= r["etiqueta"].get("confianza", 0.0) < 0.80
     ]
     if not candidatas:
         return 0
@@ -729,10 +750,10 @@ def _reverificar_lote(client, resultados_lote, fe_archivos, modelo, fecha_minima
             fe_archivos[idx].seek(0)
             img_e_orig = Image.open(fe_archivos[idx]).convert("RGB")
 
-            # Escalar a mínimo 1000px
+            # Escalar a mínimo 1200px (aumentado de 1000 para mejor nitidez dot-matrix)
             w, h = img_e_orig.size
-            if min(w, h) < 1000:
-                f = 1000 / min(w, h)
+            if min(w, h) < 1200:
+                f = 1200 / min(w, h)
                 img_e_orig = img_e_orig.resize((int(w*f), int(h*f)), Image.LANCZOS)
 
             # Aplicar filtro crop50 y relanzar
@@ -766,9 +787,9 @@ def consenso_claude_etiqueta(client, img: Image.Image, prompt: str, modelo: str,
     n_votaciones rondas independientes, cada una con 2 filtros (normal + brillante).
     Total llamadas = n_votaciones × 2 (+ hasta 1 extra por crop50 si hay desempate).
     """
-    # Escalar la imagen base una sola vez
+    # Escalar la imagen base una sola vez — mínimo 1200px para texto dot-matrix
     w, h = img.size
-    mn = 1000
+    mn = 1200
     if min(w, h) < mn:
         f = mn / min(w, h)
         img_base = img.resize((int(w*f), int(h*f)), Image.LANCZOS)
@@ -1675,17 +1696,36 @@ with tab_insp:
             img_e = Image.open(fe_s[i]).convert("RGB")
 
             def _compress(img, max_px=640):
+                img = img.copy()
                 img.thumbnail((max_px, max_px), Image.LANCZOS)
                 buf_ = io.BytesIO()
                 img.save(buf_, format="JPEG", quality=75)
                 buf_.seek(0)
                 return buf_.getvalue()
 
+            # Cuerpo: comprimido a 640px para YOLO y para el PDF
             bytes_c = _compress(img_c)
+
+            # Etiqueta: guardar en alta resolución (hasta 2000px) para Claude Vision
+            # FIX: la imagen original tiene 1500-2700px de información. Reducirla a
+            # 366px (como hacía antes el reporte PDF) destruye la nitidez del texto
+            # dot-matrix. Enviamos la imagen completa o escalada a mínimo 1000px.
+            img_e_hr = img_e.copy()
+            ew, eh = img_e_hr.size
+            # Limitar a 2000px en el lado largo para no exceder límite API (~5MB)
+            max_side = 2000
+            if max(ew, eh) > max_side:
+                scale = max_side / max(ew, eh)
+                img_e_hr = img_e_hr.resize((int(ew*scale), int(eh*scale)), Image.LANCZOS)
+            elif min(ew, eh) < 1000:
+                # Escalar hacia arriba si es muy pequeña
+                scale = 1000 / min(ew, eh)
+                img_e_hr = img_e_hr.resize((int(ew*scale), int(eh*scale)), Image.LANCZOS)
             buf_e_ = io.BytesIO()
-            img_e.save(buf_e_, format="JPEG", quality=85)
+            img_e_hr.save(buf_e_, format="JPEG", quality=88)
             buf_e_.seek(0)
             bytes_e = buf_e_.getvalue()
+            del img_e_hr
 
             corregido = False; yolo_orig = None
 
@@ -1714,9 +1754,7 @@ with tab_insp:
             _fm = st.session_state.get("fecha_minima_str")
             _prompt_e = construir_prompt_etiqueta(_fm) if _fm else PROMPT_ETIQUETA
 
-            res_e = consenso_claude_etiqueta(client, img_e, _prompt_e, modelo_sel, intentos, fecha_minima_str=_fm)
-
-            # ── Decisión NC ──────────────────────────────────────────────
+            res_e = consenso_claude_etiqueta(client, img_e, _prompt_e, modelo_sel, intentos, fecha_minima_str=_fm)            # ── Decisión NC ──────────────────────────────────────────────
             _modo_estricto = st.session_state.get("modo_estricto", False)
             nc, motivo, cat_etiqueta = es_nc(res_c, res_e, _modo_estricto)
 
