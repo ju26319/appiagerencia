@@ -540,22 +540,9 @@ def _filtro_brillante(img: Image.Image) -> Image.Image:
         img_z = ImageEnhance.Sharpness(img_z).enhance(4.0)
 
     else:  # plateada
-        # Detectar saturación especular (destello cenital que borra el texto)
-        # Si >12% de píxeles están quemados (R,G,B > 240), OSCURECER en lugar de aclarar
-        arr_check = _np.array(img_z)
-        saturados = float((arr_check > 240).all(axis=2).mean())
-        if saturados > 0.12:
-            # Zona con destello: invertir estrategia → oscurecer para recuperar texto
-            arr_f = arr_check.astype(_np.float32) / 255.0
-            arr_f = _np.power(arr_f, 2.2)   # gamma inverso: aplana los blancos
-            arr_f = (_np.clip(arr_f, 0, 1) * 255).astype(_np.uint8)
-            img_z = Image.fromarray(arr_f)
-            img_z = ImageEnhance.Contrast(img_z).enhance(3.5)
-            img_z = ImageEnhance.Sharpness(img_z).enhance(4.0)
-        else:
-            img_z = ImageEnhance.Brightness(img_z).enhance(1.6)
-            img_z = ImageEnhance.Contrast(img_z).enhance(2.8)
-            img_z = ImageEnhance.Sharpness(img_z).enhance(3.5)
+        img_z = ImageEnhance.Brightness(img_z).enhance(1.6)
+        img_z = ImageEnhance.Contrast(img_z).enhance(2.8)
+        img_z = ImageEnhance.Sharpness(img_z).enhance(3.5)
 
     return img_z
 
@@ -1096,7 +1083,7 @@ def reporte_pdf(resultados, N, n, c, decision, X, sid, correcciones_count, confi
     cv.drawString(1.8*cm, y-5, f"N={N}  ·  n={n}  ·  c={c}  ·  X={X}  ·  p'={pp:.1%}")
 
     y -= 42
-    headers = ["#", "LATA", "CUERPO", "FUENTE", "CONFIANZA", "ETIQUETA", "VOTOS 2FIL", "DECISIÓN"]
+    headers = ["#", "LATA", "CUERPO", "FUENTE", "CONFIANZA", "ETIQUETA", "VOTOS 4ROT", "DECISIÓN"]
     cw = [0.8*cm, 1.5*cm, 2.5*cm, 2.0*cm, 2.0*cm, 2.0*cm, 2.5*cm, 3.0*cm]
     cx = [1.2*cm]
     for w_ in cw[:-1]: cx.append(cx[-1]+w_)
@@ -1121,17 +1108,13 @@ def reporte_pdf(resultados, N, n, c, decision, X, sid, correcciones_count, confi
         fuente = lata["cuerpo"].get("fuente", "?")
         corregido = lata.get("corregido", False)
 
-        # Resumen de votos por filtro (2 letras para evitar ambigüedad VI/VE)
-        _ABREV = {"VIGENTE":"VI","VENCIDA":"VE","ILEGIBLE":"IL","SIN_FECHA":"SF","ERROR":"ER"}
+        # Resumen de votos por rotación
         votos_rot = lata["etiqueta"].get("_votos", {})
-        votos_str = "/".join(f"{_ABREV.get(k,k[:2])}:{v}" for k, v in votos_rot.items())[:20] if votos_rot else "-"
+        votos_str = "/".join(f"{k[0]}:{v}" for k, v in votos_rot.items())[:20] if votos_rot else "-"
 
-        # OBS si: cuerpo MENOR, o etiqueta dudosa/ilegible (igual que métricas UI)
-        _cat_e_pdf = lata.get("cat_etiqueta", "confirmada")
-        _es_obs_pdf = not nc and (clase == "MENOR" or _cat_e_pdf in ("dudosa", "ilegible"))
-        dec_txt = "NO CONFORME" if nc else ("OBS" if _es_obs_pdf else "CONFORME")
+        dec_txt = "NO CONFORME" if nc else ("OBS" if clase == "MENOR" else "CONFORME")
         dec_color = colors.HexColor("#e55353") if nc else (
-            colors.HexColor("#f0b429") if _es_obs_pdf else colors.HexColor("#27c97e"))
+            colors.HexColor("#f0b429") if clase == "MENOR" else colors.HexColor("#27c97e"))
 
         cv.setFont("Helvetica", 7)
         cv.setFillColor(colors.HexColor("#5a7a9a")); cv.drawString(cx[0]+3, y-4, str(idx+1))
@@ -1407,8 +1390,8 @@ with st.sidebar:
     intentos = st.select_slider(
         "Votaciones etiqueta (cada una = 2 análisis)",
         options=[1, 2, 3], value=1,
-        help="1 votación = 2 llamadas Claude (filtro normal + filtro brillante). "
-             "2 votaciones = 4 llamadas. 3 votaciones = 6 llamadas. "
+        help="1 votación = 4 llamadas Claude (0°/90°/180°/270°). "
+             "2 votaciones = 8 llamadas. 3 votaciones = 12 llamadas. "
              "Más votaciones = más robusto pero más costo y tiempo."
     )
 
@@ -1681,19 +1664,6 @@ with tab_insp:
                 f"🏷️ ETIQUETA/TAPA ({n_lote} fotos)",
                 type=TIPOS_IMG, accept_multiple_files=True, key="fe")
 
-    # Ordenamiento numérico natural aplicado SIEMPRE, en el momento de recibir
-    # los archivos del uploader — antes de cualquier conteo o procesamiento.
-    # Esto resuelve que el navegador envíe carpetas en orden arbitrario:
-    # 1,10,11,12...2,3 (alfabético) → 1,2,3...10,11,12 (numérico natural)
-    def _nat_key(f):
-        partes = re.split(r"(\d+)", f.name.lower())
-        return [int(p) if p.isdigit() else p for p in partes]
-
-    if fotos_c:
-        fotos_c = sorted(fotos_c, key=_nat_key)
-    if fotos_e:
-        fotos_e = sorted(fotos_e, key=_nat_key)
-
     if fotos_c or fotos_e:
         nc_u = len(fotos_c) if fotos_c else 0
         ne_u = len(fotos_e) if fotos_e else 0
@@ -1701,19 +1671,19 @@ with tab_insp:
         if nc_u != ne_u:
             st.warning(f"Cuerpos: {nc_u} · Etiquetas: {ne_u} → se analizarán {pares} pares.", icon="⚠️")
         else:
-            # Mostrar los primeros 5 nombres para que el usuario verifique el orden
-            preview_c = ", ".join(f.name for f in fotos_c[:5])
-            preview_e = ", ".join(f.name for f in fotos_e[:5])
-            st.success(f"{pares} pares listos (orden numérico natural).", icon="✅")
-            st.caption(f"Cuerpos: {preview_c}{'...' if nc_u > 5 else ''}")
-            st.caption(f"Etiquetas: {preview_e}{'...' if ne_u > 5 else ''}")
+            st.success(f"{pares} pares listos (orden por nombre de archivo).", icon="✅")
 
     puede = client and fotos_c and fotos_e and len(fotos_c) > 0 and len(fotos_e) > 0
 
     if st.button("🔬 INICIAR INSPECCIÓN", disabled=not puede, type="primary"):
-        # fotos_c y fotos_e ya están ordenados numéricamente desde arriba
-        fc_s = fotos_c
-        fe_s = fotos_e
+        # Ordenamiento numérico natural: 1,2,3...10,11,12 (no 1,10,11,12...2,3)
+        # Divide el nombre en fragmentos texto+número para comparar correctamente
+        def _nat_key(f):
+            partes = re.split(r"(\d+)", f.name.lower())
+            return [int(p) if p.isdigit() else p for p in partes]
+
+        fc_s = sorted(fotos_c, key=_nat_key)
+        fe_s = sorted(fotos_e, key=_nat_key)
         total = min(len(fc_s), len(fe_s))
         resultados = []; X = 0; obs = 0; correcciones = 0; dudosas_count = 0
 
